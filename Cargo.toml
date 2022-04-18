@@ -1,0 +1,10 @@
+[package]
+name = "seeker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+crossterm = "0.23"
+rand = "0.8"
+ron = "0.7"
