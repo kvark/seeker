@@ -1,6 +1,6 @@
 use std::mem;
 
-pub type Coordinate = u32;
+pub type Coordinate = i32;
 type TileValue = u64;
 type TileIndex = u32;
 const TILE_SHIFT: u32 = 3;
@@ -11,6 +11,7 @@ struct InternalAddress {
     mask: TileValue,
 }
 
+#[derive(Clone)]
 pub struct Grid {
     size: (Coordinate, Coordinate),
     size_in_tiles: (TileIndex, TileIndex),
@@ -33,6 +34,8 @@ impl Grid {
     }
 
     fn internal_address(&self, x: Coordinate, y: Coordinate) -> InternalAddress {
+        debug_assert!(x >= 0 && x < self.size.0);
+        debug_assert!(y >= 0 && y < self.size.1);
         let tile =
             (y >> TILE_SHIFT) as usize * self.size_in_tiles.1 as usize + (x >> TILE_SHIFT) as usize;
         let bit_index = ((y & TILE_MASK) << TILE_SHIFT) + (x & TILE_MASK);
@@ -42,17 +45,43 @@ impl Grid {
         }
     }
 
+    pub fn clear(&mut self) {
+        for v in self.data.iter_mut() {
+            *v = 0;
+        }
+    }
+
     pub fn get(&self, x: Coordinate, y: Coordinate) -> bool {
         let ia = self.internal_address(x, y);
         self.data[ia.tile] & ia.mask != 0
     }
+    pub fn get_wrapped(&self, x: Coordinate, y: Coordinate) -> bool {
+        let ia = self.internal_address(
+            if x < 0 {
+                x + self.size.0
+            } else if x >= self.size.0 {
+                x - self.size.0
+            } else {
+                x
+            },
+            if y < 0 {
+                y + self.size.1
+            } else if y >= self.size.1 {
+                y - self.size.1
+            } else {
+                y
+            },
+        );
+        self.data[ia.tile] & ia.mask != 0
+    }
 
-    pub fn set(&mut self, x: Coordinate, y: Coordinate, value: bool) {
+    pub fn set(&mut self, x: Coordinate, y: Coordinate) {
         let ia = self.internal_address(x, y);
-        if value {
-            self.data[ia.tile] |= ia.mask;
-        } else {
-            self.data[ia.tile] &= !ia.mask;
-        }
+        self.data[ia.tile] |= ia.mask;
+    }
+
+    pub fn _unset(&mut self, x: Coordinate, y: Coordinate) {
+        let ia = self.internal_address(x, y);
+        self.data[ia.tile] &= !ia.mask;
     }
 }
