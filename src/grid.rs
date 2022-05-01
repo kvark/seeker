@@ -1,87 +1,50 @@
-use std::mem;
+use std::num::NonZeroU32;
 
 pub type Coordinate = i32;
-type TileValue = u64;
-type TileIndex = u32;
-const TILE_SHIFT: u32 = 3;
-const TILE_MASK: Coordinate = (1 << TILE_SHIFT) - 1;
 
-struct InternalAddress {
-    tile: usize,
-    mask: TileValue,
+#[derive(Clone, Debug)]
+pub struct Cell {
+    pub age: NonZeroU32,
+    pub avg_breed_age: f32,
+    pub avg_velocity: [f32; 2],
 }
 
-#[derive(Clone)]
 pub struct Grid {
     size: (Coordinate, Coordinate),
-    size_in_tiles: (TileIndex, TileIndex),
-    data: Box<[TileValue]>,
+    cells: Box<[Option<Cell>]>,
 }
+
+const NULL_CELL: Option<Cell> = None;
 
 impl Grid {
     pub fn new(width: Coordinate, height: Coordinate) -> Self {
-        assert!(1 << (TILE_SHIFT * 2) == mem::size_of::<TileValue>() * 8);
-        let size_in_tiles = (
-            ((width - 1) as TileIndex >> TILE_SHIFT) + 1,
-            ((height - 1) as TileIndex >> TILE_SHIFT) + 1,
-        );
-        let data = vec![0; (size_in_tiles.0 * size_in_tiles.1) as usize].into_boxed_slice();
+        let cells = vec![NULL_CELL; width as usize * height as usize].into_boxed_slice();
         Self {
             size: (width, height),
-            size_in_tiles,
-            data,
+            cells,
         }
     }
 
-    fn internal_address(&self, x: Coordinate, y: Coordinate) -> InternalAddress {
-        debug_assert!(x >= 0 && x < self.size.0);
-        debug_assert!(y >= 0 && y < self.size.1);
-        let tile =
-            (y >> TILE_SHIFT) as usize * self.size_in_tiles.1 as usize + (x >> TILE_SHIFT) as usize;
-        let bit_index = ((y & TILE_MASK) << TILE_SHIFT) + (x & TILE_MASK);
-        InternalAddress {
-            tile,
-            mask: 1 << bit_index,
-        }
+    fn cell_index(&self, x: Coordinate, y: Coordinate) -> usize {
+        y.rem_euclid(self.size.1) as usize * (self.size.0 as usize)
+            + x.rem_euclid(self.size.0) as usize
     }
 
-    pub fn clear(&mut self) {
-        for v in self.data.iter_mut() {
-            *v = 0;
-        }
+    pub fn mutate(&mut self, x: Coordinate, y: Coordinate) -> &mut Option<Cell> {
+        let index = self.cell_index(x, y);
+        self.cells.get_mut(index).unwrap()
     }
 
-    pub fn get(&self, x: Coordinate, y: Coordinate) -> bool {
-        let ia = self.internal_address(x, y);
-        self.data[ia.tile] & ia.mask != 0
-    }
-    pub fn get_wrapped(&self, x: Coordinate, y: Coordinate) -> bool {
-        let ia = self.internal_address(
-            if x < 0 {
-                x + self.size.0
-            } else if x >= self.size.0 {
-                x - self.size.0
-            } else {
-                x
-            },
-            if y < 0 {
-                y + self.size.1
-            } else if y >= self.size.1 {
-                y - self.size.1
-            } else {
-                y
-            },
-        );
-        self.data[ia.tile] & ia.mask != 0
+    pub fn init(&mut self, x: Coordinate, y: Coordinate) {
+        *self.mutate(x, y) = Some(Cell {
+            age: NonZeroU32::new(1).unwrap(),
+            avg_breed_age: 0.0,
+            avg_velocity: [0.0; 2],
+        });
     }
 
-    pub fn set(&mut self, x: Coordinate, y: Coordinate) {
-        let ia = self.internal_address(x, y);
-        self.data[ia.tile] |= ia.mask;
-    }
-
-    pub fn _unset(&mut self, x: Coordinate, y: Coordinate) {
-        let ia = self.internal_address(x, y);
-        self.data[ia.tile] &= !ia.mask;
+    pub fn get(&self, x: Coordinate, y: Coordinate) -> Option<&Cell> {
+        let index = self.cell_index(x, y);
+        self.cells.get(index).unwrap().as_ref()
     }
 }
