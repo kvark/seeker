@@ -1,6 +1,6 @@
-use crossterm::{cursor, event, style, terminal, ExecutableCommand as _};
 use rand::Rng as _;
-use std::num::NonZeroU32;
+use std::{io::Write as _, num::NonZeroU32};
+use terminal::Action;
 
 mod grid;
 
@@ -12,6 +12,7 @@ fn blend(new: f32, old: f32) -> f32 {
 }
 
 fn main() {
+    let mut terminal = terminal::stdout();
     let size = (10, 10);
     let mut grids = [Grid::new(size.0, size.1), Grid::new(size.0, size.1)];
 
@@ -30,16 +31,14 @@ fn main() {
         g.init(2, 1);
     }
 
-    std::io::stdout()
-        .execute(terminal::EnterAlternateScreen)
-        .unwrap()
-        .execute(cursor::Hide)
-        .unwrap();
+    terminal.act(Action::EnterAlternateScreen).unwrap();
+    terminal.act(Action::EnableMouseCapture).unwrap();
+    terminal.act(Action::EnableRawMode).unwrap();
+    terminal.act(Action::HideCursor).unwrap();
 
-    terminal::enable_raw_mode().unwrap();
-
-    std::io::stdout()
-        .execute(terminal::Clear(terminal::ClearType::All))
+    //terminal.act(Action::SetTerminalSize(size.0as u16, size.1 as u16));
+    terminal
+        .act(Action::ClearTerminal(terminal::Clear::All))
         .unwrap();
 
     const NEIGHBORS: &[(Coordinate, Coordinate)] = &[
@@ -62,18 +61,21 @@ fn main() {
             for x in 0..size.0 {
                 string.push(if g.get(x, y).is_some() { '█' } else { ' ' });
             }
-            std::io::stdout()
-                .execute(cursor::MoveTo(0, y as u16))
-                .unwrap()
-                .execute(style::Print(&string))
-                .unwrap();
+            terminal.batch(Action::MoveCursorTo(0, y as u16)).unwrap();
+            terminal.write(string.as_bytes()).unwrap();
         }
+        terminal.flush_batch().unwrap();
 
-        if let event::Event::Key(event::KeyEvent { code, .. }) = event::read().unwrap() {
-            match code {
-                event::KeyCode::Esc => {
-                    break;
-                }
+        if let Ok(terminal::Retrieved::Event(Some(event))) =
+            terminal.get(terminal::Value::Event(None))
+        {
+            match event {
+                terminal::Event::Key(key_event) => match key_event.code {
+                    terminal::KeyCode::Esc => {
+                        break;
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -126,13 +128,9 @@ fn main() {
         }
     }
 
-    terminal::disable_raw_mode().unwrap();
-
-    std::io::stdout()
-        .execute(style::ResetColor)
-        .unwrap()
-        .execute(cursor::Show)
-        .unwrap()
-        .execute(terminal::LeaveAlternateScreen)
-        .unwrap();
+    terminal.act(Action::ResetColor).unwrap();
+    terminal.act(Action::ShowCursor).unwrap();
+    terminal.act(Action::DisableMouseCapture).unwrap();
+    terminal.act(Action::DisableRawMode).unwrap();
+    terminal.act(Action::LeaveAlternateScreen).unwrap();
 }
