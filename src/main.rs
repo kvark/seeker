@@ -1,28 +1,39 @@
 use rand::Rng as _;
 use std::io::Write;
-use terminal::Action;
+use terminal::{Action, Color};
 
 mod grid;
 mod sim;
 
 fn draw<W: Write>(grid: &grid::Grid, term: &mut terminal::Terminal<W>) {
     let size = grid.size();
-    let mut string = String::new();
     for y in 0..size.1 {
-        string.clear();
         for x in 0..size.0 {
-            string.push(if grid.get(x, y).is_some() { '█' } else { ' ' });
+            term.batch(Action::MoveCursorTo(x as u16, y as u16))
+                .unwrap();
+            let (symbol, color) = if let Some(cell) = grid.get(x, y) {
+                let color = if cell.avg_breed_age < 1.5 {
+                    Color::Red
+                } else if cell.avg_breed_age < 3.0 {
+                    Color::Green
+                } else {
+                    Color::Blue
+                };
+                ("█", color)
+            } else {
+                (" ", Color::Reset)
+            };
+            term.batch(Action::SetForegroundColor(color)).unwrap();
+            term.write(symbol.as_bytes()).unwrap();
         }
-        term.batch(Action::MoveCursorTo(0, y as u16)).unwrap();
-        term.write(string.as_bytes()).unwrap();
     }
     term.flush_batch().unwrap();
 }
 
 fn main() {
     let mut terminal = terminal::stdout();
-    let mut sim = sim::Simulation::new(10, 10);
-    if false {
+    let mut sim = sim::Simulation::new(60, 30);
+    if true {
         let grid = sim.current_mut();
         let size = grid.size();
         let mut rng = rand::thread_rng();
