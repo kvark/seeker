@@ -25,6 +25,10 @@ impl Grid {
         }
     }
 
+    pub fn size(&self) -> (Coordinate, Coordinate) {
+        self.size
+    }
+
     fn cell_index(&self, x: Coordinate, y: Coordinate) -> usize {
         y.rem_euclid(self.size.1) as usize * (self.size.0 as usize)
             + x.rem_euclid(self.size.0) as usize
