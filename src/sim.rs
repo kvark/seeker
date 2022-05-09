@@ -68,8 +68,8 @@ impl Simulation {
                             if let Some(cell) = prev.get(x + xa, y + ya) {
                                 avg_breed_age +=
                                     denom * blend(cell.age.get() as f32, cell.avg_breed_age);
-                                avg_velocity[0] += denom * blend(xa as f32, cell.avg_velocity[0]);
-                                avg_velocity[1] += denom * blend(ya as f32, cell.avg_velocity[1]);
+                                avg_velocity[0] += denom * blend(-xa as f32, cell.avg_velocity[0]);
+                                avg_velocity[1] += denom * blend(-ya as f32, cell.avg_velocity[1]);
                             }
                         }
                         Some(Cell {
@@ -82,7 +82,10 @@ impl Simulation {
                     Some(cell) if neighbors_count >= 2 && neighbors_count <= 3 => Some(Cell {
                         age: NonZeroU32::new(cell.age.get() + 1).unwrap(),
                         avg_breed_age: cell.avg_breed_age,
-                        avg_velocity: cell.avg_velocity,
+                        avg_velocity: [
+                            blend(0.0, cell.avg_velocity[0]),
+                            blend(0.0, cell.avg_velocity[1]),
+                        ],
                     }),
                     Some(_) => None,
                 }
