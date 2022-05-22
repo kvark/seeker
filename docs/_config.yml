@@ -1,0 +1,14 @@
+theme: jekyll-theme-architect
+
+title: Seeking for an answer to QLUE
+description: >-
+  Unqualified search for an answer to the Question of Life, Universe, and Everything.
+baseurl: "/"
+url: "https://kvark.github.io/seeker"
+
+permalink: /:title
+
+author:
+  name: "kvark"
+  email: "kvark at fastmail com"
+  url: "https://kvark.github.io"

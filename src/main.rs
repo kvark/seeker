@@ -18,9 +18,9 @@ fn draw<W: Write>(grid: &grid::Grid, term: &mut W) {
             let (symbol, color) = if let Some(cell) = grid.get(x, y) {
                 let velocity = cell.avg_velocity[0] * cell.avg_velocity[0]
                     + cell.avg_velocity[1] * cell.avg_velocity[1];
-                let color = if velocity <= 0.3 {
+                let color = if velocity <= 0.04 {
                     Color::Red
-                } else if velocity <= 1.0 {
+                } else if velocity <= 0.16 {
                     Color::Green
                 } else {
                     Color::Blue
