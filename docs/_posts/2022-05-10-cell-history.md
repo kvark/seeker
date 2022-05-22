@@ -15,6 +15,7 @@ Instead of considering the grid to be binary (and using fast logical operations 
   - velocity. Possibly normalized?
 
 We then search for life as manifestation of continuity through change:
+
 ![changes graph]({{site.baseurl}}/assets/life-changes-graph.excalidraw.png)
 
 The overall process would be:
