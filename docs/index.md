@@ -1,5 +1,5 @@
 ---
-layout: default
+layout: home
 ---
 
 Cosmos is full of wonder. Things erode, yet things self-organize.
