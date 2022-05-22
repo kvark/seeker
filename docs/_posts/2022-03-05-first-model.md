@@ -3,9 +3,11 @@ layout: post
 title: First model
 ---
 
-## M-alpha0: Recipe of Life
+This is where thread hits the road. Let's try to build an experiment for checking the theory.
 
-Focusing on the [hydrothermal vents example]({{site.baseurl}}{% post_url 2022-05-21-starting-point %}), we could build a simulation of particles in limited space. We'd need some of the following components:
+## M-alpha-0: Recipe of Life
+
+Focusing on the [hydrothermal vents example]({{site.baseurl}}{% post_url 2022-02-26-starting-point %}), we could build a simulation of particles in limited space. We'd need some of the following components:
 
   - energy transfer, or chemical reactions. There should be a law of energy conservation in place for each mini-interaction. Yet there needs to be some energy source globally.
   - some force of the [3rd law of thermodynamics](https://en.wikipedia.org/wiki/Third_law_of_thermodynamics), like erosion.
