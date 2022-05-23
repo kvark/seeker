@@ -209,6 +209,7 @@ dependencies = [
  "crossterm",
  "rand",
  "ron",
+ "serde",
 ]
 
 [[package]]
