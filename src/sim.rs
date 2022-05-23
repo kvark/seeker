@@ -1,7 +1,7 @@
 use rand::RngCore as _;
-use std::{collections::HashMap, num::NonZeroU32};
+use std::{collections::HashMap, fs::File, num::NonZeroU32, path::PathBuf};
 
-use crate::grid::{Cell, Coordinate, Grid};
+use crate::grid::{Cell, Coordinate, Coordinates, Grid};
 
 const BLEND_FACTOR: f32 = 0.2;
 fn blend(new: f32, old: f32) -> f32 {
@@ -11,12 +11,6 @@ fn blend(new: f32, old: f32) -> f32 {
 type Weight = u32;
 type Probability = f32;
 
-#[derive(Debug, Default, Eq, Hash, PartialEq)]
-struct Coordinates {
-    x: Coordinate,
-    y: Coordinate,
-}
-
 #[derive(Debug)]
 struct Rules {
     kernel: HashMap<Coordinates, Weight>,
@@ -25,7 +19,7 @@ struct Rules {
 }
 
 impl Rules {
-    fn new_conways_life() -> Self {
+    fn _new_conways_life() -> Self {
         let mut rules = Self {
             kernel: HashMap::default(),
             spawn: vec![0.0; 10],
@@ -67,6 +61,7 @@ type ProbabilityTable = HashMap<Weight, Probability>;
 
 #[derive(serde::Deserialize)]
 struct RulesConfig {
+    size: (Coordinate, Coordinate),
     kernel: Vec<String>,
     spawn: ProbabilityTable,
     keep: ProbabilityTable,
@@ -125,6 +120,8 @@ impl RulesConfig {
         for (&weight, &prob) in self.keep.iter() {
             rules.keep[weight as usize] = prob;
         }
+
+        assert!(rules.are_valid());
         Ok(rules)
     }
 }
@@ -137,11 +134,20 @@ pub struct Simulation {
 }
 
 impl Simulation {
-    pub fn new(width: Coordinate, height: Coordinate) -> Self {
+    pub fn new() -> Self {
+        let mut rules_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        rules_path.push("data");
+        rules_path.push("rules.ron");
+        let config: RulesConfig = ron::de::from_reader(File::open(rules_path).unwrap()).unwrap();
+        let size = Coordinates {
+            x: config.size.0,
+            y: config.size.1,
+        };
+
         Self {
-            grids: [Grid::new(width, height), Grid::new(width, height)],
+            grids: [Grid::new(size), Grid::new(size)],
             grid_index: 0,
-            rules: Rules::new_conways_life(),
+            rules: config.parse().unwrap(),
             rng: rand::thread_rng(),
         }
     }
@@ -168,8 +174,8 @@ impl Simulation {
         };
         let size = cur.size();
 
-        for y in 0..size.1 {
-            for x in 0..size.0 {
+        for y in 0..size.y {
+            for x in 0..size.x {
                 let score = self
                     .rules
                     .kernel

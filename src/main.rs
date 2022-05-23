@@ -11,8 +11,8 @@ fn draw<W: Write>(grid: &grid::Grid, term: &mut W) {
     use crossterm::style::Color;
 
     let size = grid.size();
-    for y in 0..size.1 {
-        for x in 0..size.0 {
+    for y in 0..size.y {
+        for x in 0..size.x {
             term.execute(ct::cursor::MoveTo(x as u16, y as u16))
                 .unwrap();
             let (symbol, color) = if let Some(cell) = grid.get(x, y) {
@@ -37,12 +37,12 @@ fn draw<W: Write>(grid: &grid::Grid, term: &mut W) {
 
 fn main() {
     let mut terminal = std::io::stdout();
-    let mut sim = sim::Simulation::new(60, 30);
+    let mut sim = sim::Simulation::new();
     if true {
         let grid = sim.current_mut();
         let size = grid.size();
         let mut rng = rand::thread_rng();
-        for _ in 0..size.0 * size.1 / 2 {
+        for _ in 0..size.x * size.y / 2 {
             grid.init(rng.gen(), rng.gen());
         }
     } else {
@@ -102,7 +102,7 @@ fn main() {
                 terminal.write(symbol.as_bytes()).unwrap();
                 // print out extra info
                 terminal
-                    .execute(ct::cursor::MoveTo(0, grid.size().1 as u16 + 2))
+                    .execute(ct::cursor::MoveTo(0, grid.size().y as u16 + 2))
                     .unwrap();
                 terminal
                     .execute(ct::style::SetForegroundColor(ct::style::Color::Black))
