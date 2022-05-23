@@ -1,4 +1,4 @@
-use rand::RngCore as _;
+use rand::{Rng as _, RngCore as _};
 use std::{collections::HashMap, fs::File, num::NonZeroU32, path::PathBuf};
 
 use crate::grid::{Cell, Coordinate, Coordinates, Grid};
@@ -62,6 +62,7 @@ type ProbabilityTable = HashMap<Weight, Probability>;
 #[derive(serde::Deserialize)]
 struct RulesConfig {
     size: (Coordinate, Coordinate),
+    random_seed: u64,
     kernel: Vec<String>,
     spawn: ProbabilityTable,
     keep: ProbabilityTable,
@@ -130,7 +131,7 @@ pub struct Simulation {
     grids: [Grid; 2],
     grid_index: usize,
     rules: Rules,
-    rng: rand::rngs::ThreadRng,
+    rng: rand::rngs::StdRng,
 }
 
 impl Simulation {
@@ -148,7 +149,15 @@ impl Simulation {
             grids: [Grid::new(size), Grid::new(size)],
             grid_index: 0,
             rules: config.parse().unwrap(),
-            rng: rand::thread_rng(),
+            rng: rand::SeedableRng::seed_from_u64(config.random_seed),
+        }
+    }
+
+    pub fn start(&mut self) {
+        let grid = self.grids.get_mut(self.grid_index).unwrap();
+        let size = grid.size();
+        for _ in 0..size.x * size.y / 2 {
+            grid.init(self.rng.gen(), self.rng.gen());
         }
     }
 

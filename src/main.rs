@@ -1,5 +1,4 @@
 use crossterm::{self as ct, ExecutableCommand as _};
-use rand::Rng as _;
 use std::io::Write;
 
 mod grid;
@@ -39,12 +38,7 @@ fn main() {
     let mut terminal = std::io::stdout();
     let mut sim = sim::Simulation::new();
     if true {
-        let grid = sim.current_mut();
-        let size = grid.size();
-        let mut rng = rand::thread_rng();
-        for _ in 0..size.x * size.y / 2 {
-            grid.init(rng.gen(), rng.gen());
-        }
+        sim.start();
     } else {
         let grid = sim.current_mut();
         // glider
