@@ -127,11 +127,17 @@ impl RulesConfig {
     }
 }
 
+#[derive(Default)]
+pub struct Metadata {
+    pub num_alive: usize,
+}
+
 pub struct Simulation {
     grids: [Grid; 2],
     grid_index: usize,
     rules: Rules,
     rng: rand::rngs::StdRng,
+    step: usize,
 }
 
 impl Simulation {
@@ -150,6 +156,7 @@ impl Simulation {
             grid_index: 0,
             rules: config.parse().unwrap(),
             rng: rand::SeedableRng::seed_from_u64(config.random_seed),
+            step: 0,
         }
     }
 
@@ -159,6 +166,11 @@ impl Simulation {
         for _ in 0..size.x * size.y / 2 {
             grid.init(self.rng.gen(), self.rng.gen());
         }
+        self.step = 0;
+    }
+
+    pub fn progress(&self) -> usize {
+        self.step
     }
 
     pub fn current(&self) -> &Grid {
@@ -169,7 +181,7 @@ impl Simulation {
         self.grids.get_mut(self.grid_index).unwrap()
     }
 
-    pub fn advance(&mut self) {
+    pub fn advance(&mut self) -> Metadata {
         let prev_index = self.grid_index;
         self.grid_index = (self.grid_index + 1) % self.grids.len();
 
@@ -182,6 +194,9 @@ impl Simulation {
             grids_after.last().unwrap()
         };
         let size = cur.size();
+
+        self.step += 1;
+        let mut meta = Metadata::default();
 
         for y in 0..size.y {
             for x in 0..size.x {
@@ -213,23 +228,29 @@ impl Simulation {
                                     denom * blend(-offsets.y as f32, cell.avg_velocity[1]);
                             }
                         }
+                        meta.num_alive += 1;
                         Some(Cell {
                             age: NonZeroU32::new(1).unwrap(),
                             avg_breed_age,
                             avg_velocity,
                         })
                     }
-                    Some(cell) if coin < self.rules.keep[score as usize] => Some(Cell {
-                        age: NonZeroU32::new(cell.age.get() + 1).unwrap(),
-                        avg_breed_age: cell.avg_breed_age,
-                        avg_velocity: [
-                            blend(0.0, cell.avg_velocity[0]),
-                            blend(0.0, cell.avg_velocity[1]),
-                        ],
-                    }),
+                    Some(cell) if coin < self.rules.keep[score as usize] => {
+                        meta.num_alive += 1;
+                        Some(Cell {
+                            age: NonZeroU32::new(cell.age.get() + 1).unwrap(),
+                            avg_breed_age: cell.avg_breed_age,
+                            avg_velocity: [
+                                blend(0.0, cell.avg_velocity[0]),
+                                blend(0.0, cell.avg_velocity[1]),
+                            ],
+                        })
+                    }
                     _ => None,
                 };
             }
         }
+
+        meta
     }
 }

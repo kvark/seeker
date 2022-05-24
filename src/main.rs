@@ -43,7 +43,7 @@ impl sim::Simulation {
 
         let block = tui::widgets::Block::default()
             .borders(tui::widgets::Borders::ALL)
-            .title("Grid");
+            .title(format!("Grid step-{}", self.progress()));
         let inner = block.inner(rects[0]);
         frame.render_widget(block, rects[0]);
         frame.render_widget(GridRef(self.current()), inner);
@@ -88,7 +88,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 ev::KeyCode::Char(' ') => {
-                    sim.advance();
+                    let meta = sim.advance();
+                    if meta.num_alive == 0 {
+                        sim.start();
+                    }
                     terminal.draw(|f| sim.draw(f))?;
                 }
                 _ => {}
