@@ -1,41 +1,59 @@
-use crossterm::{self as ct, ExecutableCommand as _};
-use std::io::Write;
-
 mod grid;
 mod sim;
 
-const FULL: &'static str = "█";
+struct GridRef<'a>(&'a grid::Grid);
+impl tui::widgets::Widget for GridRef<'_> {
+    fn render(self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
+        use tui::style::Color;
 
-fn draw<W: Write>(grid: &grid::Grid, term: &mut W) {
-    use crossterm::style::Color;
-
-    let size = grid.size();
-    for y in 0..size.y {
-        for x in 0..size.x {
-            term.execute(ct::cursor::MoveTo(x as u16, y as u16))
-                .unwrap();
-            let (symbol, color) = if let Some(cell) = grid.get(x, y) {
-                let velocity = cell.avg_velocity[0] * cell.avg_velocity[0]
-                    + cell.avg_velocity[1] * cell.avg_velocity[1];
-                let color = if velocity <= 0.04 {
-                    Color::Red
-                } else if velocity <= 0.16 {
-                    Color::Green
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let (symbol, color) = if let Some(cell) = self.0.get(x as _, y as _) {
+                    let velocity = cell.avg_velocity[0] * cell.avg_velocity[0]
+                        + cell.avg_velocity[1] * cell.avg_velocity[1];
+                    let color = if velocity <= 0.04 {
+                        Color::Red
+                    } else if velocity <= 0.16 {
+                        Color::Green
+                    } else {
+                        Color::Blue
+                    };
+                    ("█", color)
                 } else {
-                    Color::Blue
+                    (" ", Color::Reset)
                 };
-                (FULL, color)
-            } else {
-                (" ", Color::Reset)
-            };
-            term.execute(ct::style::SetForegroundColor(color)).unwrap();
-            term.write(symbol.as_bytes()).unwrap();
+
+                let cell_index = (y + area.y) * buf.area.width + x + area.x;
+                buf.content[cell_index as usize] = tui::buffer::Cell {
+                    symbol: symbol.to_string(), // what a waste!
+                    fg: color,
+                    ..Default::default()
+                };
+            }
         }
     }
 }
 
-fn main() {
-    let mut terminal = std::io::stdout();
+impl sim::Simulation {
+    fn draw<B: tui::backend::Backend>(&self, frame: &mut tui::Frame<B>) {
+        let rects = tui::layout::Layout::default()
+            .constraints([tui::layout::Constraint::Percentage(100)].as_ref())
+            .margin(1)
+            .split(frame.size());
+
+        let block = tui::widgets::Block::default()
+            .borders(tui::widgets::Borders::ALL)
+            .title("Grid");
+        let inner = block.inner(rects[0]);
+        frame.render_widget(block, rects[0]);
+        frame.render_widget(GridRef(self.current()), inner);
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use crossterm::ExecutableCommand as _;
+
+    let mut stdout = std::io::stdout();
     let mut sim = sim::Simulation::new();
     if true {
         sim.start();
@@ -49,40 +67,39 @@ fn main() {
         grid.init(2, 1);
     }
 
-    terminal
-        .execute(ct::terminal::EnterAlternateScreen)
-        .unwrap();
-    terminal.execute(ct::event::EnableMouseCapture).unwrap();
-    ct::terminal::enable_raw_mode().unwrap();
-    terminal.execute(ct::cursor::Hide).unwrap();
+    stdout.execute(crossterm::terminal::EnterAlternateScreen)?;
+    stdout.execute(crossterm::event::EnableMouseCapture)?;
+    crossterm::terminal::enable_raw_mode()?;
+    let backend = tui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = tui::Terminal::new(backend)?;
 
-    //terminal.act(Action::SetTerminalSize(size.0as u16, size.1 as u16));
-    terminal
-        .execute(ct::terminal::Clear(ct::terminal::ClearType::All))
-        .unwrap();
-
-    draw(sim.current(), &mut terminal);
+    terminal.hide_cursor()?;
+    terminal.draw(|f| sim.draw(f))?;
 
     loop {
         use crossterm::event as ev;
-        match ct::event::read() {
+        match crossterm::event::read() {
             Err(_) => break,
+            Ok(ev::Event::Resize(..)) => {
+                terminal.draw(|f| sim.draw(f))?;
+            }
             Ok(ev::Event::Key(event)) => match event.code {
                 ev::KeyCode::Esc => {
                     break;
                 }
                 ev::KeyCode::Char(' ') => {
                     sim.advance();
-                    draw(sim.current(), &mut terminal);
+                    terminal.draw(|f| sim.draw(f))?;
                 }
                 _ => {}
             },
             Ok(ev::Event::Mouse(ev::MouseEvent {
                 kind: ev::MouseEventKind::Down(_),
-                column,
-                row,
+                column: _,
+                row: _,
                 modifiers: _,
             })) => {
+                /*
                 let grid = sim.current();
                 let cell = grid.get(column as _, row as _);
                 // mark the current cell as selected
@@ -106,16 +123,20 @@ fn main() {
                     .unwrap();
                 write!(terminal, "{:?}", cell).unwrap();
                 terminal.flush().unwrap();
+                */
             }
-            Ok(ev::Event::Resize(..)) | Ok(ev::Event::Mouse(..)) => {}
+            Ok(ev::Event::Mouse(..)) => {}
         }
     }
 
-    terminal.execute(ct::style::ResetColor).unwrap();
-    terminal.execute(ct::cursor::Show).unwrap();
-    ct::terminal::disable_raw_mode().unwrap();
-    terminal.execute(ct::event::DisableMouseCapture).unwrap();
+    crossterm::terminal::disable_raw_mode()?;
     terminal
-        .execute(ct::terminal::LeaveAlternateScreen)
-        .unwrap();
+        .backend_mut()
+        .execute(crossterm::event::DisableMouseCapture)?;
+    terminal
+        .backend_mut()
+        .execute(crossterm::terminal::LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    Ok(())
 }
