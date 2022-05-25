@@ -88,58 +88,71 @@ impl sim::Simulation {
         frame.render_widget(grid_block, top_rects[0]);
         frame.render_widget(GridWidget { grid, state }, inner);
 
-        let meta_rects = l::Layout::default()
-            .direction(l::Direction::Vertical)
-            .constraints(
-                [
-                    l::Constraint::Min(3),
-                    l::Constraint::Min(4),
-                    l::Constraint::Min(4),
-                ]
-                .as_ref(),
-            )
-            .split(top_rects[1]);
+        {
+            let meta_rects = l::Layout::default()
+                .direction(l::Direction::Vertical)
+                .constraints(
+                    [
+                        l::Constraint::Min(3),
+                        l::Constraint::Min(4),
+                        l::Constraint::Min(4),
+                    ]
+                    .as_ref(),
+                )
+                .split(top_rects[1]);
 
-        let para_size = w::Paragraph::new(vec![
-            make_key_value("Size = ", format!("{}x{}", grid_size.x, grid_size.y)),
-            make_key_value("Random = ", format!("{}", self.random_seed())),
-        ])
-        .block(w::Block::default().title("Info").borders(w::Borders::ALL))
-        .wrap(w::Wrap { trim: false });
-        frame.render_widget(para_size, meta_rects[0]);
+            let para_size = w::Paragraph::new(vec![
+                make_key_value("Size = ", format!("{}x{}", grid_size.x, grid_size.y)),
+                make_key_value("Random = ", format!("{}", self.random_seed())),
+            ])
+            .block(w::Block::default().title("Info").borders(w::Borders::ALL))
+            .wrap(w::Wrap { trim: false });
+            frame.render_widget(para_size, meta_rects[0]);
 
-        let stat_block = w::Block::default().title("Stat").borders(w::Borders::ALL);
-        let stat_rects = l::Layout::default()
-            .direction(l::Direction::Vertical)
-            .constraints([l::Constraint::Min(1), l::Constraint::Min(1)].as_ref())
-            .split(stat_block.inner(meta_rects[1]));
-        frame.render_widget(stat_block, meta_rects[1]);
+            {
+                let stat_block = w::Block::default().title("Stat").borders(w::Borders::ALL);
+                let stat_rects = l::Layout::default()
+                    .direction(l::Direction::Vertical)
+                    .constraints([l::Constraint::Min(1), l::Constraint::Min(1)].as_ref())
+                    .split(stat_block.inner(meta_rects[1]));
+                frame.render_widget(stat_block, meta_rects[1]);
 
-        let para_progress = w::Paragraph::new(vec![make_key_value(
-            "Progress = ",
-            format!("{}", self.progress()),
-        )])
-        .wrap(w::Wrap { trim: false });
-        frame.render_widget(para_progress, stat_rects[0]);
-
-        let alive = grid.count_alive() as f32 / (grid_size.x * grid_size.y) as f32;
-        let occupancy = w::Gauge::default()
-            .gauge_style(Style::default().fg(Color::DarkGray))
-            .percent((100.0 * alive.sqrt()) as u16)
-            .label("alive");
-        frame.render_widget(occupancy, stat_rects[1]);
-
-        if let Some(coords) = state.selection {
-            let x = coords.x - inner.x as grid::Coordinate;
-            let y = coords.y - inner.y as grid::Coordinate;
-            let mut text = vec![make_key_value("Coord = ", format!("{}x{}", x, y))];
-            if let Some(cell) = grid.get(x, y) {
-                text.push(make_key_value("Age = ", format!("{}", cell.age.get())));
-            }
-            let para_selection = w::Paragraph::new(text)
-                .block(w::Block::default().title("Cell").borders(w::Borders::ALL))
+                let para_progress = w::Paragraph::new(vec![make_key_value(
+                    "Progress = ",
+                    format!("{}", self.progress()),
+                )])
                 .wrap(w::Wrap { trim: false });
-            frame.render_widget(para_selection, meta_rects[2]);
+                frame.render_widget(para_progress, stat_rects[0]);
+
+                let alive = grid.count_alive() as f32 / (grid_size.x * grid_size.y) as f32;
+                let occupancy_color = if alive > 0.1 {
+                    Color::Blue
+                } else if alive > 0.02 {
+                    Color::Green
+                } else {
+                    Color::Red
+                };
+                let occupancy = w::Gauge::default()
+                    .gauge_style(Style::default().fg(occupancy_color))
+                    // Square root brings more precision to lower occupancy,
+                    // which is what we mostly care about.
+                    .percent((100.0 * alive.sqrt()) as u16)
+                    .label("alive");
+                frame.render_widget(occupancy, stat_rects[1]);
+            }
+
+            if let Some(coords) = state.selection {
+                let x = coords.x - inner.x as grid::Coordinate;
+                let y = coords.y - inner.y as grid::Coordinate;
+                let mut text = vec![make_key_value("Coord = ", format!("{}x{}", x, y))];
+                if let Some(cell) = grid.get(x, y) {
+                    text.push(make_key_value("Age = ", format!("{}", cell.age.get())));
+                }
+                let para_selection = w::Paragraph::new(text)
+                    .block(w::Block::default().title("Cell").borders(w::Borders::ALL))
+                    .wrap(w::Wrap { trim: false });
+                frame.render_widget(para_selection, meta_rects[2]);
+            }
         }
     }
 }
