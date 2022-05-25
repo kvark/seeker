@@ -137,6 +137,7 @@ pub struct Simulation {
     grid_index: usize,
     rules: Rules,
     rng: rand::rngs::StdRng,
+    random_seed: u64,
     step: usize,
 }
 
@@ -156,6 +157,7 @@ impl Simulation {
             grid_index: 0,
             rules: config.parse().unwrap(),
             rng: rand::SeedableRng::seed_from_u64(config.random_seed),
+            random_seed: config.random_seed,
             step: 0,
         }
     }
@@ -167,6 +169,10 @@ impl Simulation {
             grid.init(self.rng.gen(), self.rng.gen());
         }
         self.step = 0;
+    }
+
+    pub fn random_seed(&self) -> u64 {
+        self.random_seed
     }
 
     pub fn progress(&self) -> usize {
