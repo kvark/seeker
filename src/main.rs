@@ -19,9 +19,9 @@ impl tui::widgets::Widget for GridWidget<'_> {
                 let (symbol, color) = if let Some(cell) = self.grid.get(x as _, y as _) {
                     let velocity = cell.avg_velocity[0] * cell.avg_velocity[0]
                         + cell.avg_velocity[1] * cell.avg_velocity[1];
-                    let color = if velocity <= 0.04 {
+                    let color = if velocity <= 0.03 {
                         Color::Red
-                    } else if velocity <= 0.16 {
+                    } else if velocity <= 0.10 {
                         Color::Green
                     } else {
                         Color::Blue
@@ -76,7 +76,7 @@ impl sim::Simulation {
             .constraints(
                 [
                     l::Constraint::Min(grid_size.x as _),
-                    l::Constraint::Percentage(10),
+                    l::Constraint::Percentage(15),
                 ]
                 .as_ref(),
             )
@@ -88,13 +88,13 @@ impl sim::Simulation {
         frame.render_widget(grid_block, top_rects[0]);
         frame.render_widget(GridWidget { grid, state }, inner);
 
-        let info_rects = l::Layout::default()
+        let meta_rects = l::Layout::default()
             .direction(l::Direction::Vertical)
             .constraints(
                 [
-                    l::Constraint::Percentage(20),
-                    l::Constraint::Percentage(20),
-                    l::Constraint::Percentage(20),
+                    l::Constraint::Min(3),
+                    l::Constraint::Min(4),
+                    l::Constraint::Min(4),
                 ]
                 .as_ref(),
             )
@@ -106,15 +106,28 @@ impl sim::Simulation {
         ])
         .block(w::Block::default().title("Info").borders(w::Borders::ALL))
         .wrap(w::Wrap { trim: false });
-        frame.render_widget(para_size, info_rects[0]);
+        frame.render_widget(para_size, meta_rects[0]);
+
+        let stat_block = w::Block::default().title("Stat").borders(w::Borders::ALL);
+        let stat_rects = l::Layout::default()
+            .direction(l::Direction::Vertical)
+            .constraints([l::Constraint::Min(1), l::Constraint::Min(1)].as_ref())
+            .split(stat_block.inner(meta_rects[1]));
+        frame.render_widget(stat_block, meta_rects[1]);
 
         let para_progress = w::Paragraph::new(vec![make_key_value(
             "Progress = ",
             format!("{}", self.progress()),
         )])
-        .block(w::Block::default().title("Stat").borders(w::Borders::ALL))
         .wrap(w::Wrap { trim: false });
-        frame.render_widget(para_progress, info_rects[1]);
+        frame.render_widget(para_progress, stat_rects[0]);
+
+        let alive = grid.count_alive() as f32 / (grid_size.x * grid_size.y) as f32;
+        let occupancy = w::Gauge::default()
+            .gauge_style(Style::default().fg(Color::DarkGray))
+            .percent((100.0 * alive.sqrt()) as u16)
+            .label("alive");
+        frame.render_widget(occupancy, stat_rects[1]);
 
         if let Some(coords) = state.selection {
             let x = coords.x - inner.x as grid::Coordinate;
@@ -126,7 +139,7 @@ impl sim::Simulation {
             let para_selection = w::Paragraph::new(text)
                 .block(w::Block::default().title("Cell").borders(w::Borders::ALL))
                 .wrap(w::Wrap { trim: false });
-            frame.render_widget(para_selection, info_rects[2]);
+            frame.render_widget(para_selection, meta_rects[2]);
         }
     }
 }

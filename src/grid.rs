@@ -53,4 +53,8 @@ impl Grid {
         let index = self.cell_index(x, y);
         self.cells.get(index).unwrap().as_ref()
     }
+
+    pub fn count_alive(&self) -> usize {
+        self.cells.iter().filter(|cell| cell.is_some()).count()
+    }
 }
