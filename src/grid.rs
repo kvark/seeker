@@ -19,6 +19,10 @@ pub struct Grid {
     cells: Box<[Option<Cell>]>,
 }
 
+pub struct GridAnalysis {
+    pub alive_ratio: f32,
+}
+
 const NULL_CELL: Option<Cell> = None;
 
 impl Grid {
@@ -54,7 +58,10 @@ impl Grid {
         self.cells.get(index).unwrap().as_ref()
     }
 
-    pub fn count_alive(&self) -> usize {
-        self.cells.iter().filter(|cell| cell.is_some()).count()
+    pub fn analyze(&self) -> GridAnalysis {
+        let alive: usize = self.cells.iter().filter(|cell| cell.is_some()).count();
+        GridAnalysis {
+            alive_ratio: alive as f32 / (self.size.x * self.size.y) as f32,
+        }
     }
 }

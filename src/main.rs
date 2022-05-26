@@ -4,7 +4,12 @@ mod sim;
 #[derive(Default)]
 struct WidgetState {
     selection: Option<grid::Coordinates>,
+    population_age: usize,
 }
+
+const POPULATION_CHANGE_THRESHOLD: f32 = 0.1;
+const POPULATION_DANGER_THRESHOLD: f32 = 0.02;
+const MAX_POPULATION_AGE_LOG: usize = 16;
 
 struct GridWidget<'a> {
     grid: &'a grid::Grid,
@@ -94,7 +99,7 @@ impl sim::Simulation {
                 .constraints(
                     [
                         l::Constraint::Min(3),
-                        l::Constraint::Min(4),
+                        l::Constraint::Min(5),
                         l::Constraint::Min(4),
                     ]
                     .as_ref(),
@@ -113,7 +118,14 @@ impl sim::Simulation {
                 let stat_block = w::Block::default().title("Stat").borders(w::Borders::ALL);
                 let stat_rects = l::Layout::default()
                     .direction(l::Direction::Vertical)
-                    .constraints([l::Constraint::Min(1), l::Constraint::Min(1)].as_ref())
+                    .constraints(
+                        [
+                            l::Constraint::Min(1),
+                            l::Constraint::Min(1),
+                            l::Constraint::Min(1),
+                        ]
+                        .as_ref(),
+                    )
                     .split(stat_block.inner(meta_rects[1]));
                 frame.render_widget(stat_block, meta_rects[1]);
 
@@ -124,10 +136,10 @@ impl sim::Simulation {
                 .wrap(w::Wrap { trim: false });
                 frame.render_widget(para_progress, stat_rects[0]);
 
-                let alive = grid.count_alive() as f32 / (grid_size.x * grid_size.y) as f32;
-                let occupancy_color = if alive > 0.1 {
+                let analysis = grid.analyze();
+                let occupancy_color = if analysis.alive_ratio > POPULATION_CHANGE_THRESHOLD {
                     Color::Blue
-                } else if alive > 0.02 {
+                } else if analysis.alive_ratio > POPULATION_DANGER_THRESHOLD {
                     Color::Green
                 } else {
                     Color::Red
@@ -136,9 +148,29 @@ impl sim::Simulation {
                     .gauge_style(Style::default().fg(occupancy_color))
                     // Square root brings more precision to lower occupancy,
                     // which is what we mostly care about.
-                    .percent((100.0 * alive.sqrt()) as u16)
-                    .label("alive");
+                    .percent((100.0 * analysis.alive_ratio.sqrt()) as u16)
+                    .label(format!(
+                        "{}% alive",
+                        (100.0 * analysis.alive_ratio) as usize
+                    ));
                 frame.render_widget(occupancy, stat_rects[1]);
+
+                let age_log = std::mem::size_of::<usize>() * 8
+                    - state.population_age.leading_zeros() as usize;
+                let age_color = if age_log > 10 {
+                    Color::White
+                } else if age_log > 5 {
+                    Color::Gray
+                } else {
+                    Color::DarkGray
+                };
+                let population_age = w::Gauge::default()
+                    .gauge_style(Style::default().fg(age_color))
+                    // Square root brings more precision to lower occupancy,
+                    // which is what we mostly care about.
+                    .percent((100 * age_log / MAX_POPULATION_AGE_LOG) as u16)
+                    .label(format!("{} age", age_log));
+                frame.render_widget(population_age, stat_rects[2]);
             }
 
             if let Some(coords) = state.selection {
@@ -194,10 +226,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 ev::KeyCode::Char(' ') => {
-                    let meta = sim.advance();
-                    if meta.num_alive == 0 {
+                    sim.advance();
+                    // analyze the state
+                    let analysis = sim.current().analyze();
+                    if analysis.alive_ratio == 0.0 {
                         sim.start();
+                        state.selection = None;
+                        state.population_age = 0;
+                    } else if analysis.alive_ratio > POPULATION_CHANGE_THRESHOLD {
+                        state.population_age = 0;
                     }
+                    state.population_age += 1;
                 }
                 _ => continue,
             },
