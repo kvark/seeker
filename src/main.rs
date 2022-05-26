@@ -1,15 +1,12 @@
 mod grid;
 mod sim;
 
+const POPULATION_DANGER_THRESHOLD: f32 = 0.02;
+
 #[derive(Default)]
 struct WidgetState {
     selection: Option<grid::Coordinates>,
-    population_age: usize,
 }
-
-const POPULATION_CHANGE_THRESHOLD: f32 = 0.1;
-const POPULATION_DANGER_THRESHOLD: f32 = 0.02;
-const MAX_POPULATION_AGE_LOG: usize = 16;
 
 struct GridWidget<'a> {
     grid: &'a grid::Grid,
@@ -137,7 +134,7 @@ impl sim::Simulation {
                 frame.render_widget(para_progress, stat_rects[0]);
 
                 let analysis = grid.analyze();
-                let occupancy_color = if analysis.alive_ratio > POPULATION_CHANGE_THRESHOLD {
+                let occupancy_color = if analysis.alive_ratio > self.limits().min_extra_population {
                     Color::Blue
                 } else if analysis.alive_ratio > POPULATION_DANGER_THRESHOLD {
                     Color::Green
@@ -155,8 +152,16 @@ impl sim::Simulation {
                     ));
                 frame.render_widget(occupancy, stat_rects[1]);
 
-                let age_log = std::mem::size_of::<usize>() * 8
-                    - state.population_age.leading_zeros() as usize;
+                fn get_bits(number: usize) -> usize {
+                    std::mem::size_of::<usize>() * 8 - number.leading_zeros() as usize
+                }
+
+                let age_log = get_bits(self.population().age);
+                let max_age = match self.population().kind {
+                    sim::PopulationKind::Intra => self.limits().max_intra_population_age,
+                    sim::PopulationKind::Extra => self.limits().max_extra_population_age,
+                };
+                let max_age_log = get_bits(max_age);
                 let age_color = if age_log > 10 {
                     Color::White
                 } else if age_log > 5 {
@@ -168,7 +173,7 @@ impl sim::Simulation {
                     .gauge_style(Style::default().fg(age_color))
                     // Square root brings more precision to lower occupancy,
                     // which is what we mostly care about.
-                    .percent((100 * age_log / MAX_POPULATION_AGE_LOG) as u16)
+                    .percent((100 * age_log / max_age_log) as u16)
                     .label(format!("{} age", age_log));
                 frame.render_widget(population_age, stat_rects[2]);
             }
@@ -226,17 +231,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 ev::KeyCode::Char(' ') => {
-                    sim.advance();
-                    // analyze the state
-                    let analysis = sim.current().analyze();
-                    if analysis.alive_ratio == 0.0 {
+                    if let Err(_) = sim.advance() {
                         sim.start();
                         state.selection = None;
-                        state.population_age = 0;
-                    } else if analysis.alive_ratio > POPULATION_CHANGE_THRESHOLD {
-                        state.population_age = 0;
                     }
-                    state.population_age += 1;
                 }
                 _ => continue,
             },
