@@ -10,7 +10,7 @@ This is where thread hits the road. Let's try to build an experiment for checkin
 Focusing on the [hydrothermal vents example]({{site.baseurl}}{% post_url 2022-02-26-starting-point %}), we could build a simulation of particles in limited space. We'd need some of the following components:
 
   - energy transfer, or chemical reactions. There should be a law of energy conservation in place for each mini-interaction. Yet there needs to be some energy source globally.
-  - some force of the [3rd law of thermodynamics](https://en.wikipedia.org/wiki/Third_law_of_thermodynamics), like erosion.
+  - some force of the [2nd law of thermodynamics](https://en.wikipedia.org/wiki/Second_law_of_thermodynamics), like erosion.
   - space where things can move and group together, like water.
   - different kinds of matter (rock, energy, and something active).
 
