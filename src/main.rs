@@ -103,10 +103,10 @@ impl sim::Simulation {
                 )
                 .split(top_rects[1]);
 
-            let para_size = w::Paragraph::new(vec![
-                make_key_value("Size = ", format!("{}x{}", grid_size.x, grid_size.y)),
-                make_key_value("Random = ", format!("{}", self.random_seed())),
-            ])
+            let para_size = w::Paragraph::new(vec![make_key_value(
+                "Size = ",
+                format!("{}x{}", grid_size.x, grid_size.y),
+            )])
             .block(w::Block::default().title("Info").borders(w::Borders::ALL))
             .wrap(w::Wrap { trim: false });
             frame.render_widget(para_size, meta_rects[0]);
@@ -194,68 +194,103 @@ impl sim::Simulation {
     }
 }
 
+enum Mode {
+    Play {
+        sim: sim::Simulation,
+        state: WidgetState,
+    },
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use crossterm::ExecutableCommand as _;
+    use std::fs::File;
+
+    const MY_NAME: &str = "seeker";
+    const PLAY_COMMAND: &str = "play";
+    const FIND_COMMAND: &str = "find";
+
+    let mut args = std::env::args();
+    let _exec_name = args.next().unwrap();
+    let command = match args.next() {
+        Some(cmd) => cmd,
+        None => {
+            println!("Usage:");
+            println!("{} {} [<path_to_snap>]", MY_NAME, PLAY_COMMAND);
+            println!("{} {} <path_to_folder>", MY_NAME, FIND_COMMAND);
+            return Ok(());
+        }
+    };
+    let mode = match command.as_str() {
+        PLAY_COMMAND => {
+            let snap_name = match args.next() {
+                Some(string) => string,
+                None => "data/default-snap.ron".to_string(),
+            };
+            let mut snap_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            snap_path.push(snap_name);
+            let config = ron::de::from_reader(File::open(snap_path).unwrap()).unwrap();
+            Mode::Play {
+                sim: sim::Simulation::new(config),
+                state: WidgetState::default(),
+            }
+        }
+        FIND_COMMAND => {
+            unimplemented!()
+        }
+        _ => {
+            println!("Unknown command: '{}'", command);
+            return Ok(());
+        }
+    };
 
     let mut stdout = std::io::stdout();
-    let mut sim = sim::Simulation::new();
-    if true {
-        sim.start();
-    } else {
-        let grid = sim.current_mut();
-        // glider
-        grid.init(1, 3);
-        grid.init(2, 3);
-        grid.init(3, 3);
-        grid.init(3, 2);
-        grid.init(2, 1);
-    }
-
     stdout.execute(crossterm::terminal::EnterAlternateScreen)?;
     stdout.execute(crossterm::event::EnableMouseCapture)?;
     crossterm::terminal::enable_raw_mode()?;
+
     let backend = tui::backend::CrosstermBackend::new(stdout);
     let mut terminal = tui::Terminal::new(backend)?;
-
-    let mut state = WidgetState::default();
     terminal.hide_cursor()?;
-    terminal.draw(|f| sim.draw(&state, f))?;
 
-    loop {
-        use crossterm::event as ev;
-        match crossterm::event::read() {
-            Err(_) => break,
-            Ok(ev::Event::Resize(..)) => {}
-            Ok(ev::Event::Key(event)) => match event.code {
-                ev::KeyCode::Esc => {
-                    break;
-                }
-                ev::KeyCode::Char(' ') => {
-                    if let Err(_) = sim.advance() {
-                        sim.start();
-                        state.selection = None;
+    match mode {
+        Mode::Play { mut sim, mut state } => {
+            terminal.draw(|f| sim.draw(&state, f))?;
+            loop {
+                use crossterm::event as ev;
+                match crossterm::event::read() {
+                    Err(_) => break,
+                    Ok(ev::Event::Resize(..)) => {}
+                    Ok(ev::Event::Key(event)) => match event.code {
+                        ev::KeyCode::Esc => {
+                            break;
+                        }
+                        ev::KeyCode::Char(' ') => {
+                            if let Err(_conclusion) = sim.advance() {
+                                break;
+                            }
+                        }
+                        _ => continue,
+                    },
+                    Ok(ev::Event::Mouse(ev::MouseEvent {
+                        kind: ev::MouseEventKind::Down(_),
+                        column,
+                        row,
+                        modifiers: _,
+                    })) => {
+                        let new = Some(grid::Coordinates {
+                            x: column as _,
+                            y: row as _,
+                        });
+                        state.selection = if state.selection == new { None } else { new };
+                    }
+                    Ok(ev::Event::Mouse(..)) => {
+                        continue;
                     }
                 }
-                _ => continue,
-            },
-            Ok(ev::Event::Mouse(ev::MouseEvent {
-                kind: ev::MouseEventKind::Down(_),
-                column,
-                row,
-                modifiers: _,
-            })) => {
-                let new = Some(grid::Coordinates {
-                    x: column as _,
-                    y: row as _,
-                });
-                state.selection = if state.selection == new { None } else { new };
-            }
-            Ok(ev::Event::Mouse(..)) => {
-                continue;
+
+                terminal.draw(|f| sim.draw(&state, f))?;
             }
         }
-
-        terminal.draw(|f| sim.draw(&state, f))?;
     }
 
     crossterm::terminal::disable_raw_mode()?;

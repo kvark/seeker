@@ -1,5 +1,5 @@
-use rand::{Rng as _, RngCore as _};
-use std::{collections::HashMap, fs::File, num::NonZeroU32, path::PathBuf};
+use rand::{Rng as _, RngCore};
+use std::{collections::HashMap, num::NonZeroU32};
 
 use crate::grid::{Cell, Coordinate, Coordinates, Grid, GridAnalysis};
 
@@ -40,16 +40,14 @@ struct Rules {
     kernel: HashMap<Coordinates, Weight>,
     spawn: Vec<Probability>,
     keep: Vec<Probability>,
-    limits: Limits,
 }
 
 impl Rules {
-    fn _new_conways_life(limits: Limits) -> Self {
+    fn _new_conways_life() -> Self {
         let mut rules = Self {
             kernel: HashMap::default(),
             spawn: vec![0.0; 10],
             keep: vec![0.0; 10],
-            limits,
         };
         for x in [-1, 0, 1] {
             for y in [-1, 0, 1] {
@@ -79,7 +77,69 @@ impl Rules {
         if self.keep.len() <= sum || !self.keep.iter().all(|&prob| 0.0 <= prob && prob <= 1.0) {
             return false;
         }
-        self.limits.are_valid()
+        true
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub enum Data {
+    Random {
+        width: Coordinate,
+        height: Coordinate,
+        alive_ratio: f32,
+    },
+    Grid(Vec<String>),
+}
+
+#[derive(Debug)]
+enum DataParseError {
+    UnknownSymbol(char),
+    WrongLineLength,
+}
+
+impl Data {
+    fn parse(&self, rng: &mut impl RngCore) -> Result<Grid, DataParseError> {
+        match *self {
+            Self::Random {
+                width,
+                height,
+                alive_ratio,
+            } => {
+                let mut grid = Grid::new(Coordinates {
+                    x: width,
+                    y: height,
+                });
+                let count = (width as f32 * height as f32 * alive_ratio) as u32;
+                for _ in 0..count {
+                    grid.init(rng.gen(), rng.gen());
+                }
+                Ok(grid)
+            }
+            Self::Grid(ref lines) => {
+                let size = Coordinates {
+                    x: lines.first().ok_or(DataParseError::WrongLineLength)?.len() as Coordinate
+                        * 4,
+                    y: lines.len() as Coordinate,
+                };
+                let mut grid = Grid::new(size);
+                for (y, line) in lines.iter().enumerate() {
+                    for (x, ch) in line.chars().enumerate() {
+                        let number = match ch {
+                            '0'..='9' => ch as usize - '0' as usize,
+                            'a'..='f' => 10 + ch as usize - 'a' as usize,
+                            'A'..='F' => 10 + ch as usize - 'A' as usize,
+                            _ => return Err(DataParseError::UnknownSymbol(ch)),
+                        };
+                        for z in 0..4 {
+                            if number & 1 << z != 0 {
+                                grid.init(x as Coordinate * 4 + z, y as Coordinate);
+                            }
+                        }
+                    }
+                }
+                Ok(grid)
+            }
+        }
     }
 }
 
@@ -87,27 +147,23 @@ type ProbabilityTable = HashMap<Weight, Probability>;
 
 #[derive(serde::Deserialize)]
 pub struct HumanRules {
-    size: (Coordinate, Coordinate),
-    random_seed: u64,
     kernel: Vec<String>,
     spawn: ProbabilityTable,
     keep: ProbabilityTable,
-    limits: Limits,
 }
 
 #[derive(Debug)]
-enum HumanRulesError {
+enum RulesParseError {
     UnknownSymbol(char),
     MissingKernelCenter,
 }
 
 impl HumanRules {
-    fn parse(&self) -> Result<Rules, HumanRulesError> {
+    fn parse(&self) -> Result<Rules, RulesParseError> {
         let mut rules = Rules {
             kernel: HashMap::default(),
             spawn: Vec::new(),
             keep: Vec::new(),
-            limits: self.limits.clone(),
         };
         let center = self
             .kernel
@@ -121,7 +177,7 @@ impl HumanRules {
                         y: row as Coordinate,
                     })
             })
-            .ok_or(HumanRulesError::MissingKernelCenter)?;
+            .ok_or(RulesParseError::MissingKernelCenter)?;
 
         for (row, line) in self.kernel.iter().enumerate() {
             for (column, ch) in line.chars().enumerate() {
@@ -134,7 +190,7 @@ impl HumanRules {
                         };
                         rules.kernel.insert(offset, ch as Weight - '0' as Weight);
                     }
-                    _ => return Err(HumanRulesError::UnknownSymbol(ch)),
+                    _ => return Err(RulesParseError::UnknownSymbol(ch)),
                 }
             }
         }
@@ -153,6 +209,14 @@ impl HumanRules {
         assert!(rules.are_valid());
         Ok(rules)
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct Snap {
+    data: Data,
+    rules: HumanRules,
+    random_seed: u64,
+    limits: Limits,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -176,32 +240,26 @@ pub struct Simulation {
     grids: [Grid; 2],
     grid_index: usize,
     rules: Rules,
+    limits: Limits,
     rng: rand::rngs::StdRng,
-    random_seed: u64,
     step: usize,
     population: Population,
 }
 
 impl Simulation {
-    pub fn new() -> Self {
-        let mut rules_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        rules_path.push("data");
-        rules_path.push("rules.ron");
-        let config = ron::de::from_reader(File::open(rules_path).unwrap()).unwrap();
-        Self::from_human(config)
-    }
+    pub fn new(snap: Snap) -> Self {
+        let mut rng = rand::SeedableRng::seed_from_u64(snap.random_seed);
+        let rules = snap.rules.parse().unwrap();
+        let grid = snap.data.parse(&mut rng).unwrap();
+        let size = grid.size();
+        assert!(snap.limits.are_valid());
 
-    pub fn from_human(config: HumanRules) -> Self {
-        let size = Coordinates {
-            x: config.size.0,
-            y: config.size.1,
-        };
         Self {
-            grids: [Grid::new(size), Grid::new(size)],
+            grids: [grid, Grid::new(size)],
             grid_index: 0,
-            rules: config.parse().unwrap(),
-            rng: rand::SeedableRng::seed_from_u64(config.random_seed),
-            random_seed: config.random_seed,
+            rules,
+            limits: snap.limits,
+            rng,
             step: 0,
             population: Population {
                 kind: PopulationKind::Extra,
@@ -210,28 +268,13 @@ impl Simulation {
         }
     }
 
-    pub fn _full_cycle(config: HumanRules) -> Conclusion {
-        let mut this = Self::from_human(config);
-        this.start();
+    pub fn _full_cycle(snap: Snap) -> Conclusion {
+        let mut this = Self::new(snap);
         loop {
             if let Err(conclusion) = this.advance() {
                 return conclusion;
             }
         }
-    }
-
-    pub fn start(&mut self) {
-        let grid = self.grids.get_mut(self.grid_index).unwrap();
-        let size = grid.size();
-        for _ in 0..size.x * size.y / 2 {
-            grid.init(self.rng.gen(), self.rng.gen());
-        }
-        self.step = 0;
-        self.population.age = 0;
-    }
-
-    pub fn random_seed(&self) -> u64 {
-        self.random_seed
     }
 
     pub fn progress(&self) -> usize {
@@ -243,14 +286,14 @@ impl Simulation {
     }
 
     pub fn limits(&self) -> &Limits {
-        &self.rules.limits
+        &self.limits
     }
 
     pub fn current(&self) -> &Grid {
         self.grids.get(self.grid_index).unwrap()
     }
 
-    pub fn current_mut(&mut self) -> &mut Grid {
+    pub fn _current_mut(&mut self) -> &mut Grid {
         self.grids.get_mut(self.grid_index).unwrap()
     }
 
@@ -319,16 +362,10 @@ impl Simulation {
         }
 
         let analysis = grid.analyze();
-        let (kind, max_age) = if analysis.alive_ratio > self.rules.limits.min_extra_population {
-            (
-                PopulationKind::Extra,
-                self.rules.limits.max_extra_population_age,
-            )
+        let (kind, max_age) = if analysis.alive_ratio > self.limits.min_extra_population {
+            (PopulationKind::Extra, self.limits.max_extra_population_age)
         } else if analysis.alive_ratio > 0.0 {
-            (
-                PopulationKind::Intra,
-                self.rules.limits.max_intra_population_age,
-            )
+            (PopulationKind::Intra, self.limits.max_intra_population_age)
         } else {
             return Err(Conclusion::Extinct);
         };
@@ -337,7 +374,7 @@ impl Simulation {
             self.population.kind = kind;
         }
         self.population.age += 1;
-        if self.population.age > self.rules.limits.max_steps {
+        if self.population.age > self.limits.max_steps {
             Err(Conclusion::Indeterminate)
         } else if self.population.age > max_age {
             Err(Conclusion::Stable(kind))
