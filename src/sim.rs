@@ -1,5 +1,6 @@
 use rand::{Rng as _, RngCore};
-use std::{collections::HashMap, num::NonZeroU32};
+use rustc_hash::FxHashMap;
+use std::num::NonZeroU32;
 
 use crate::grid::{Cell, Coordinate, Coordinates, Grid, GridAnalysis};
 
@@ -11,7 +12,7 @@ fn blend(new: f32, old: f32) -> f32 {
 type Weight = u32;
 type Probability = f32;
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Limits {
     pub min_extra_population: f32,
     pub max_steps: usize,
@@ -37,7 +38,7 @@ impl Limits {
 
 #[derive(Debug)]
 struct Rules {
-    kernel: HashMap<Coordinates, Weight>,
+    kernel: FxHashMap<Coordinates, Weight>,
     spawn: Vec<Probability>,
     keep: Vec<Probability>,
 }
@@ -45,7 +46,7 @@ struct Rules {
 impl Rules {
     fn _new_conways_life() -> Self {
         let mut rules = Self {
-            kernel: HashMap::default(),
+            kernel: FxHashMap::default(),
             spawn: vec![0.0; 10],
             keep: vec![0.0; 10],
         };
@@ -81,7 +82,7 @@ impl Rules {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Data {
     Random {
         width: Coordinate,
@@ -141,11 +142,36 @@ impl Data {
             }
         }
     }
+
+    fn unparse(grid: &Grid) -> Self {
+        let size = grid.size();
+        assert_eq!(size.x % 4, 0);
+        let mut lines = Vec::with_capacity(size.y as usize);
+        for y in 0..size.y {
+            let mut line = String::new();
+            for x in 0..size.x / 4 {
+                let mut number = 0u32;
+                for z in 0..4 {
+                    if grid.get(x * 4 + z, y).is_some() {
+                        number |= 1 << z;
+                    }
+                }
+                let ch_code = if number >= 10 {
+                    'a' as u32 + number - 10
+                } else {
+                    '0' as u32 + number
+                };
+                line.push(char::from_u32(ch_code).unwrap());
+            }
+            lines.push(line);
+        }
+        Data::Grid(lines)
+    }
 }
 
-type ProbabilityTable = HashMap<Weight, Probability>;
+type ProbabilityTable = FxHashMap<Weight, Probability>;
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct HumanRules {
     kernel: Vec<String>,
     spawn: ProbabilityTable,
@@ -161,7 +187,7 @@ enum RulesParseError {
 impl HumanRules {
     fn parse(&self) -> Result<Rules, RulesParseError> {
         let mut rules = Rules {
-            kernel: HashMap::default(),
+            kernel: FxHashMap::default(),
             spawn: Vec::new(),
             keep: Vec::new(),
         };
@@ -209,9 +235,47 @@ impl HumanRules {
         assert!(rules.are_valid());
         Ok(rules)
     }
+
+    fn unparse(rules: &Rules) -> Self {
+        let mut hr = HumanRules::default();
+        {
+            // unparse the kernel
+            let (mut xmin, mut xmax, mut ymin, mut ymax) = (0, 0, 0, 0);
+            for offset in rules.kernel.keys() {
+                xmin = xmin.min(offset.x);
+                xmax = xmax.max(offset.x);
+                ymin = ymin.min(offset.y);
+                ymax = ymax.max(offset.y);
+            }
+            let kernel_size = Coordinates {
+                x: 1 + xmax - xmin,
+                y: 1 + ymax - ymin,
+            };
+            let mut proto_kernel = vec![' '; (kernel_size.x * kernel_size.y) as usize];
+            proto_kernel[(-ymin * kernel_size.x - xmin) as usize] = 'X';
+            for (offset, &weight) in rules.kernel.iter() {
+                let index = (offset.y - ymin) * kernel_size.x + offset.x - xmin;
+                proto_kernel[index as usize] = char::from_u32('0' as u32 + weight as u32).unwrap();
+            }
+            for proto_line in proto_kernel.chunks(kernel_size.x as usize) {
+                hr.kernel.push(proto_line.iter().cloned().collect());
+            }
+        }
+        for (w, &prob) in rules.spawn.iter().enumerate() {
+            if w != 0 {
+                hr.spawn.insert(w as Weight, prob);
+            }
+        }
+        for (w, &prob) in rules.keep.iter().enumerate() {
+            if w != 0 {
+                hr.keep.insert(w as Weight, prob);
+            }
+        }
+        hr
+    }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Snap {
     data: Data,
     rules: HumanRules,
@@ -242,6 +306,7 @@ pub struct Simulation {
     rules: Rules,
     limits: Limits,
     rng: rand::rngs::StdRng,
+    random_seed: u64,
     step: usize,
     population: Population,
 }
@@ -260,6 +325,7 @@ impl Simulation {
             rules,
             limits: snap.limits,
             rng,
+            random_seed: snap.random_seed,
             step: 0,
             population: Population {
                 kind: PopulationKind::Extra,
@@ -277,12 +343,25 @@ impl Simulation {
         }
     }
 
+    pub fn save_snap(&self) -> Snap {
+        Snap {
+            data: Data::unparse(self.current()),
+            rules: HumanRules::unparse(&self.rules),
+            random_seed: self.random_seed,
+            limits: self.limits.clone(),
+        }
+    }
+
     pub fn progress(&self) -> usize {
         self.step
     }
 
     pub fn population(&self) -> &Population {
         &self.population
+    }
+
+    pub fn random_seed(&self) -> u64 {
+        self.random_seed
     }
 
     pub fn limits(&self) -> &Limits {

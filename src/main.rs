@@ -103,10 +103,10 @@ impl sim::Simulation {
                 )
                 .split(top_rects[1]);
 
-            let para_size = w::Paragraph::new(vec![make_key_value(
-                "Size = ",
-                format!("{}x{}", grid_size.x, grid_size.y),
-            )])
+            let para_size = w::Paragraph::new(vec![
+                make_key_value("Size = ", format!("{}x{}", grid_size.x, grid_size.y)),
+                make_key_value("Random = ", format!("{}", self.random_seed())),
+            ])
             .block(w::Block::default().title("Info").borders(w::Borders::ALL))
             .wrap(w::Wrap { trim: false });
             frame.render_widget(para_size, meta_rects[0]);
@@ -263,6 +263,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(ev::Event::Key(event)) => match event.code {
                         ev::KeyCode::Esc => {
                             break;
+                        }
+                        ev::KeyCode::Char('s') => {
+                            let snap = sim.save_snap();
+                            let age = sim.population().age;
+                            if let Ok(file) = File::create(format!("age-{}.ron", age)) {
+                                ron::ser::to_writer_pretty(
+                                    file,
+                                    &snap,
+                                    ron::ser::PrettyConfig::default(),
+                                )
+                                .unwrap();
+                            }
                         }
                         ev::KeyCode::Char(' ') => {
                             if let Err(_conclusion) = sim.advance() {

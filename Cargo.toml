@@ -8,5 +8,6 @@ publish = false
 crossterm = "0.23"
 rand = "0.8"
 ron = "0.7"
+rustc-hash = "1"
 serde = { version = "1", features = ["serde_derive"]}
 tui = "0.18"
