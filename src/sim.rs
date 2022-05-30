@@ -9,8 +9,8 @@ fn blend(new: f32, old: f32) -> f32 {
     new * BLEND_FACTOR + old * (1.0 - BLEND_FACTOR)
 }
 
-type Weight = u32;
-type Probability = f32;
+pub type Weight = u32;
+pub type Probability = f32;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Limits {
@@ -82,7 +82,7 @@ impl Rules {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Data {
     Random {
         width: Coordinate,
@@ -169,13 +169,13 @@ impl Data {
     }
 }
 
-type ProbabilityTable = FxHashMap<Weight, Probability>;
+pub type ProbabilityTable = FxHashMap<Weight, Probability>;
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HumanRules {
-    kernel: Vec<String>,
-    spawn: ProbabilityTable,
-    keep: ProbabilityTable,
+    pub kernel: Vec<String>,
+    pub spawn: ProbabilityTable,
+    pub keep: ProbabilityTable,
 }
 
 #[derive(Debug)]
@@ -232,7 +232,9 @@ impl HumanRules {
             rules.keep[weight as usize] = prob;
         }
 
-        assert!(rules.are_valid());
+        if !rules.are_valid() {
+            log::error!("Rules {:?} are invalid", rules);
+        }
         Ok(rules)
     }
 
@@ -275,10 +277,10 @@ impl HumanRules {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Snap {
-    data: Data,
-    rules: HumanRules,
+    pub data: Data,
+    pub rules: HumanRules,
     random_seed: u64,
     limits: Limits,
 }
@@ -294,6 +296,7 @@ pub struct Population {
     pub age: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum Conclusion {
     Extinct,
     Indeterminate,
@@ -312,7 +315,7 @@ pub struct Simulation {
 }
 
 impl Simulation {
-    pub fn new(snap: Snap) -> Self {
+    pub fn new(snap: &Snap) -> Self {
         let mut rng = rand::SeedableRng::seed_from_u64(snap.random_seed);
         let rules = snap.rules.parse().unwrap();
         let grid = snap.data.parse(&mut rng).unwrap();
@@ -323,7 +326,7 @@ impl Simulation {
             grids: [grid, Grid::new(size)],
             grid_index: 0,
             rules,
-            limits: snap.limits,
+            limits: snap.limits.clone(),
             rng,
             random_seed: snap.random_seed,
             step: 0,
@@ -331,15 +334,6 @@ impl Simulation {
                 kind: PopulationKind::Extra,
                 age: 0,
             },
-        }
-    }
-
-    pub fn _full_cycle(snap: Snap) -> Conclusion {
-        let mut this = Self::new(snap);
-        loop {
-            if let Err(conclusion) = this.advance() {
-                return conclusion;
-            }
         }
     }
 
@@ -453,7 +447,7 @@ impl Simulation {
             self.population.kind = kind;
         }
         self.population.age += 1;
-        if self.population.age > self.limits.max_steps {
+        if self.step > self.limits.max_steps {
             Err(Conclusion::Indeterminate)
         } else if self.population.age > max_age {
             Err(Conclusion::Stable(kind))

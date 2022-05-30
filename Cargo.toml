@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 crossterm = "0.23"
+log = "0.4"
 rand = "0.8"
 ron = "0.7"
 rustc-hash = "1"

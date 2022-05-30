@@ -1,0 +1,7 @@
+(
+    max_active: 20,
+    max_iterations: 100,
+    size_power: (start:6, end:10),
+    probability_step: 0.5,
+    max_probability_weight: 8,
+)

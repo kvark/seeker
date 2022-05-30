@@ -1,16 +1,17 @@
 mod grid;
+mod lab;
 mod sim;
 
 const POPULATION_DANGER_THRESHOLD: f32 = 0.02;
 
 #[derive(Default)]
-struct WidgetState {
+struct SimState {
     selection: Option<grid::Coordinates>,
 }
 
 struct GridWidget<'a> {
     grid: &'a grid::Grid,
-    state: &'a WidgetState,
+    state: &'a SimState,
 }
 impl tui::widgets::Widget for GridWidget<'_> {
     fn render(self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
@@ -55,7 +56,7 @@ impl tui::widgets::Widget for GridWidget<'_> {
 }
 
 impl sim::Simulation {
-    fn draw<B: tui::backend::Backend>(&self, state: &WidgetState, frame: &mut tui::Frame<B>) {
+    fn draw<B: tui::backend::Backend>(&self, state: &SimState, frame: &mut tui::Frame<B>) {
         use tui::{
             layout as l,
             style::{Color, Style},
@@ -194,16 +195,62 @@ impl sim::Simulation {
     }
 }
 
+impl lab::Laboratory {
+    fn draw<B: tui::backend::Backend>(&self, frame: &mut tui::Frame<B>) {
+        use tui::{
+            layout as l,
+            style::{Color, Style},
+            text::{Span, Spans},
+            widgets as w,
+        };
+
+        let experiments = self.experiments();
+        let list_items = experiments
+            .iter()
+            .map(|experiment| {
+                w::ListItem::new(vec![Spans(vec![
+                    Span::styled(
+                        format!("[{}]", experiment.index),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(
+                        format!(" - fit {}", experiment.fit),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(
+                        format!(" - step {}", experiment.steps),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])])
+            })
+            .collect::<Vec<_>>();
+
+        let title = format!("Experiments at iteration {}", self.iteration());
+        let experiment_list = w::List::new(list_items)
+            .block(w::Block::default().borders(w::Borders::ALL).title(title))
+            .start_corner(l::Corner::TopLeft);
+
+        let top_rects = l::Layout::default()
+            .direction(l::Direction::Horizontal)
+            .constraints([l::Constraint::Min(experiments.len() as u16)].as_ref())
+            .margin(1)
+            .split(frame.size());
+
+        frame.render_widget(experiment_list, top_rects[0]);
+    }
+}
+
 enum Mode {
     Play {
         sim: sim::Simulation,
-        state: WidgetState,
+        state: SimState,
     },
+    Find(lab::Laboratory),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use crossterm::ExecutableCommand as _;
-    use std::fs::File;
+    use std::{fs::File, path::PathBuf};
 
     const MY_NAME: &str = "seeker";
     const PLAY_COMMAND: &str = "play";
@@ -216,26 +263,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             println!("Usage:");
             println!("{} {} [<path_to_snap>]", MY_NAME, PLAY_COMMAND);
-            println!("{} {} <path_to_folder>", MY_NAME, FIND_COMMAND);
+            println!("{} {} <path_to_init_snap>", MY_NAME, FIND_COMMAND);
             return Ok(());
         }
     };
+    let snap_name = match args.next() {
+        Some(string) => string,
+        None => "data/default-snap.ron".to_string(),
+    };
+    let mut snap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    snap_path.push(snap_name);
+    let init_snap = ron::de::from_reader(File::open(snap_path).unwrap()).unwrap();
+
     let mode = match command.as_str() {
-        PLAY_COMMAND => {
-            let snap_name = match args.next() {
-                Some(string) => string,
-                None => "data/default-snap.ron".to_string(),
-            };
-            let mut snap_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            snap_path.push(snap_name);
-            let config = ron::de::from_reader(File::open(snap_path).unwrap()).unwrap();
-            Mode::Play {
-                sim: sim::Simulation::new(config),
-                state: WidgetState::default(),
-            }
-        }
+        PLAY_COMMAND => Mode::Play {
+            sim: sim::Simulation::new(&init_snap),
+            state: SimState::default(),
+        },
         FIND_COMMAND => {
-            unimplemented!()
+            let mut config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            config_path.push("data");
+            config_path.push("config.ron");
+            let config = ron::de::from_reader(File::open(config_path).unwrap()).unwrap();
+            let mut lab = lab::Laboratory::new(config);
+            lab.add_experiment(init_snap);
+            Mode::Find(lab)
         }
         _ => {
             println!("Unknown command: '{}'", command);
@@ -266,8 +318,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         ev::KeyCode::Char('s') => {
                             let snap = sim.save_snap();
-                            let age = sim.population().age;
-                            if let Ok(file) = File::create(format!("age-{}.ron", age)) {
+                            let steps = sim.progress();
+                            if let Ok(file) = File::create(format!("step-{}.ron", steps)) {
                                 ron::ser::to_writer_pretty(
                                     file,
                                     &snap,
@@ -277,7 +329,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         ev::KeyCode::Char(' ') => {
-                            if let Err(_conclusion) = sim.advance() {
+                            if let Err(conclusion) = sim.advance() {
+                                log::info!("Conclusion: {:?}", conclusion);
                                 break;
                             }
                         }
@@ -301,6 +354,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 terminal.draw(|f| sim.draw(&state, f))?;
+            }
+        }
+        Mode::Find(mut lab) => {
+            lab.update_from(0);
+            terminal.draw(|f| lab.draw(f))?;
+            loop {
+                use crossterm::event as ev;
+                match crossterm::event::read() {
+                    Err(_) => break,
+                    Ok(ev::Event::Resize(..)) => {}
+                    Ok(ev::Event::Key(event)) => match event.code {
+                        ev::KeyCode::Esc => {
+                            break;
+                        }
+                        ev::KeyCode::Char(' ') => match lab.iterate() {
+                            lab::LabResult::Normal => {}
+                            lab::LabResult::Found(snap) => {
+                                let file = File::create("finding.ron").unwrap();
+                                ron::ser::to_writer_pretty(
+                                    file,
+                                    &snap,
+                                    ron::ser::PrettyConfig::default(),
+                                )
+                                .unwrap();
+                                break;
+                            }
+                            lab::LabResult::End => break,
+                        },
+                        _ => continue,
+                    },
+                    Ok(ev::Event::Mouse(..)) => {
+                        continue;
+                    }
+                }
+
+                terminal.draw(|f| lab.draw(f))?;
             }
         }
     }
