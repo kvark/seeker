@@ -24,8 +24,8 @@
 	),
 	limits: (
 		min_extra_population: 0.1,
-		max_steps: 0x10000,
+		max_steps: 0x1000,
 		max_extra_population_age: 0x100,
-		max_intra_population_age: 0x1000,
+		max_intra_population_age: 0x500,
 	),
 )

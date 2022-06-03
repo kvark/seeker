@@ -118,9 +118,9 @@ impl sim::Simulation {
                     .direction(l::Direction::Vertical)
                     .constraints(
                         [
-                            l::Constraint::Min(1),
-                            l::Constraint::Min(1),
-                            l::Constraint::Min(1),
+                            l::Constraint::Length(1),
+                            l::Constraint::Length(1),
+                            l::Constraint::Length(1),
                         ]
                         .as_ref(),
                     )
@@ -208,35 +208,57 @@ impl lab::Laboratory {
         let list_items = experiments
             .iter()
             .map(|experiment| {
-                w::ListItem::new(vec![Spans(vec![
+                let mut spans = vec![
                     Span::styled(
-                        format!("[{}]", experiment.index),
+                        format!("[{}]", experiment.id),
                         Style::default().fg(Color::White),
-                    ),
-                    Span::styled(
-                        format!(" - fit {}", experiment.fit),
-                        Style::default().fg(Color::Yellow),
                     ),
                     Span::styled(
                         format!(" - step {}", experiment.steps),
                         Style::default().fg(Color::DarkGray),
                     ),
-                ])])
+                ];
+                if let Some(conclusion) = experiment.conclusion {
+                    spans.push(Span::raw(" ("));
+                    spans.push(Span::styled(
+                        format!("{:?}", conclusion),
+                        Style::default().fg(Color::Blue),
+                    ));
+                    spans.push(Span::raw(") - "));
+                    spans.push(Span::styled(
+                        format!("fit {}", experiment.fit),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+                w::ListItem::new(vec![Spans(spans)])
             })
             .collect::<Vec<_>>();
 
-        let title = format!("Experiments at iteration {}", self.iteration());
         let experiment_list = w::List::new(list_items)
-            .block(w::Block::default().borders(w::Borders::ALL).title(title))
+            .block(
+                w::Block::default()
+                    .borders(w::Borders::ALL)
+                    .title("Experiments"),
+            )
             .start_corner(l::Corner::TopLeft);
 
         let top_rects = l::Layout::default()
-            .direction(l::Direction::Horizontal)
-            .constraints([l::Constraint::Min(experiments.len() as u16)].as_ref())
+            .direction(l::Direction::Vertical)
+            .constraints(
+                [
+                    l::Constraint::Length(1),
+                    l::Constraint::Min(experiments.len() as u16),
+                ]
+                .as_ref(),
+            )
             .margin(1)
             .split(frame.size());
 
-        frame.render_widget(experiment_list, top_rects[0]);
+        let progress = w::Gauge::default()
+            .gauge_style(Style::default().fg(Color::White))
+            .percent(self.progress_percent() as u16);
+        frame.render_widget(progress, top_rects[0]);
+        frame.render_widget(experiment_list, top_rects[1]);
     }
 }
 
@@ -246,6 +268,14 @@ enum Mode {
         state: SimState,
     },
     Find(lab::Laboratory),
+}
+
+#[derive(Debug)]
+enum ExitReason {
+    Error,
+    Quit,
+    Done,
+    Finding,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -304,17 +334,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = tui::Terminal::new(backend)?;
     terminal.hide_cursor()?;
 
-    match mode {
+    let reason = match mode {
         Mode::Play { mut sim, mut state } => {
             terminal.draw(|f| sim.draw(&state, f))?;
             loop {
                 use crossterm::event as ev;
                 match crossterm::event::read() {
-                    Err(_) => break,
+                    Err(_) => break ExitReason::Error,
                     Ok(ev::Event::Resize(..)) => {}
                     Ok(ev::Event::Key(event)) => match event.code {
                         ev::KeyCode::Esc => {
-                            break;
+                            break ExitReason::Quit;
                         }
                         ev::KeyCode::Char('s') => {
                             let snap = sim.save_snap();
@@ -331,7 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ev::KeyCode::Char(' ') => {
                             if let Err(conclusion) = sim.advance() {
                                 log::info!("Conclusion: {:?}", conclusion);
-                                break;
+                                break ExitReason::Done;
                             }
                         }
                         _ => continue,
@@ -357,42 +387,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Mode::Find(mut lab) => {
-            lab.update_from(0);
             terminal.draw(|f| lab.draw(f))?;
             loop {
                 use crossterm::event as ev;
-                match crossterm::event::read() {
-                    Err(_) => break,
+
+                let event = match crossterm::event::poll(std::time::Duration::from_millis(100)) {
+                    Ok(true) => crossterm::event::read(),
+                    Ok(false) => Ok(ev::Event::Resize(0, 0)),
+                    Err(_) => break ExitReason::Error,
+                };
+
+                match event {
+                    Err(_) => break ExitReason::Error,
                     Ok(ev::Event::Resize(..)) => {}
                     Ok(ev::Event::Key(event)) => match event.code {
                         ev::KeyCode::Esc => {
-                            break;
+                            let snap = lab.best_candidate();
+                            let file = File::create("candidate.ron").unwrap();
+                            ron::ser::to_writer_pretty(
+                                file,
+                                snap,
+                                ron::ser::PrettyConfig::default(),
+                            )
+                            .unwrap();
+                            break ExitReason::Quit;
                         }
-                        ev::KeyCode::Char(' ') => match lab.iterate() {
-                            lab::LabResult::Normal => {}
-                            lab::LabResult::Found(snap) => {
-                                let file = File::create("finding.ron").unwrap();
-                                ron::ser::to_writer_pretty(
-                                    file,
-                                    &snap,
-                                    ron::ser::PrettyConfig::default(),
-                                )
-                                .unwrap();
-                                break;
-                            }
-                            lab::LabResult::End => break,
-                        },
-                        _ => continue,
+                        _ => {}
                     },
                     Ok(ev::Event::Mouse(..)) => {
                         continue;
                     }
                 }
 
-                terminal.draw(|f| lab.draw(f))?;
+                match lab.update() {
+                    lab::LabResult::Normal => {
+                        terminal.draw(|f| lab.draw(f))?;
+                    }
+                    lab::LabResult::Found(snap) => {
+                        let file = File::create("finding.ron").unwrap();
+                        ron::ser::to_writer_pretty(file, &snap, ron::ser::PrettyConfig::default())
+                            .unwrap();
+                        break ExitReason::Finding;
+                    }
+                    lab::LabResult::End => {
+                        let snap = lab.best_candidate();
+                        let file = File::create("candidate.ron").unwrap();
+                        ron::ser::to_writer_pretty(file, &snap, ron::ser::PrettyConfig::default())
+                            .unwrap();
+                        break ExitReason::Done;
+                    }
+                }
             }
         }
-    }
+    };
 
     crossterm::terminal::disable_raw_mode()?;
     terminal
@@ -403,5 +450,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .execute(crossterm::terminal::LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    println!("{:?}", reason);
     Ok(())
 }

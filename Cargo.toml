@@ -5,6 +5,8 @@ edition = "2021"
 publish = false
 
 [dependencies]
+choir = "0.4"
+crossbeam-channel = "0.5"
 crossterm = "0.23"
 log = "0.4"
 rand = "0.8"
