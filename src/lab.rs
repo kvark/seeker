@@ -150,8 +150,9 @@ impl Laboratory {
             .experiments
             .get(self.config.max_active)
             .map_or(0, |ex| ex.fit);
+        let best_id = self.experiments[0].id;
         self.experiments
-            .retain(|ex| ex.conclusion.is_none() || ex.fit > retain_cutoff);
+            .retain(|ex| ex.conclusion.is_none() || ex.fit > retain_cutoff || ex.id == best_id);
 
         if self.next_id >= self.config.max_iterations {
             if self.experiments.len() == self.config.max_active {
@@ -187,23 +188,40 @@ impl Laboratory {
     fn mutate_probabilities(&mut self, probabilities: &mut ProbabilityTable) {
         let index = self.rng.gen_range(0..=self.config.max_probability_weight);
         let value = probabilities.entry(index).or_insert(0.0);
-        if *value <= 0.0 {
-            *value += self.config.probability_step;
-        } else if *value >= 1.0 {
-            *value -= self.config.probability_step;
+        let left = *value - self.config.probability_step;
+        let right = *value + self.config.probability_step;
+        *value = if left < 0.0 {
+            right
+        } else if right < 1.0 {
+            right
         } else {
-            let sign = (self.rng.gen::<u32>() & 1) as f32 * 2.0 - 1.0;
-            *value += sign * self.config.probability_step;
-        }
+            [left, right][self.rng.gen_range(0..2)]
+        };
     }
 
     fn mutate_snap(&mut self, snap: &mut Snap) {
-        match self.rng.gen_range(0..3) {
+        match self.rng.gen_range(0..4) {
             0 => {
                 self.mutate_probabilities(&mut snap.rules.spawn);
             }
             1 => {
                 self.mutate_probabilities(&mut snap.rules.keep);
+            }
+            2 => {
+                let row_index = self.rng.gen_range(0..snap.rules.kernel.len());
+                let row = &mut snap.rules.kernel[row_index];
+                let candidates = row.char_indices().filter(|(_, c)| c.is_numeric()).collect::<Vec<_>>();
+                let (byte_offset, ch) = candidates[self.rng.gen_range(0..candidates.len())];
+                let other = if ch == '0' {
+                    '1' as u8
+                } else if ch == '5' {
+                    '4' as u8
+                } else {
+                    [ch as u8 - 1, ch as u8 + 1][self.rng.gen_range(0..2)]
+                };
+                unsafe {
+                    row.as_bytes_mut()[byte_offset] = other;
+                }
             }
             _ => {
                 // size change

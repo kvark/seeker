@@ -1,8 +1,8 @@
 (
-    max_iterations: 100,
+    max_iterations: 1000,
     max_active: 10,
     max_in_flight: 20,
-    size_power: (start:4, end:8),
+    size_power: (start:6, end:10),
     probability_step: 0.5,
     max_probability_weight: 8,
 )
