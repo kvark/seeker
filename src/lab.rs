@@ -210,7 +210,10 @@ impl Laboratory {
             2 => {
                 let row_index = self.rng.gen_range(0..snap.rules.kernel.len());
                 let row = &mut snap.rules.kernel[row_index];
-                let candidates = row.char_indices().filter(|(_, c)| c.is_numeric()).collect::<Vec<_>>();
+                let candidates = row
+                    .char_indices()
+                    .filter(|(_, c)| c.is_numeric())
+                    .collect::<Vec<_>>();
                 let (byte_offset, ch) = candidates[self.rng.gen_range(0..candidates.len())];
                 let other = if ch == '0' {
                     '1' as u8

@@ -4,6 +4,16 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[lib]
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[[bench]]
+name = "main"
+harness = false
+
 [dependencies]
 choir = "0.4"
 crossbeam-channel = "0.5"
@@ -14,3 +24,6 @@ ron = "0.7"
 rustc-hash = "1"
 serde = { version = "1", features = ["serde_derive"]}
 tui = "0.18"
+
+[dev-dependencies]
+criterion = "0.3"

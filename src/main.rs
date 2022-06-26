@@ -1,8 +1,6 @@
-mod grid;
-mod lab;
-mod sim;
-
 const POPULATION_DANGER_THRESHOLD: f32 = 0.02;
+
+use seeker::{grid, lab, sim};
 
 #[derive(Default)]
 struct SimState {
@@ -55,211 +53,211 @@ impl tui::widgets::Widget for GridWidget<'_> {
     }
 }
 
-impl sim::Simulation {
-    fn draw<B: tui::backend::Backend>(&self, state: &SimState, frame: &mut tui::Frame<B>) {
-        use tui::{
-            layout as l,
-            style::{Color, Style},
-            text::{Span, Spans},
-            widgets as w,
-        };
+fn draw_sim<B: tui::backend::Backend>(
+    sim: &sim::Simulation,
+    state: &SimState,
+    frame: &mut tui::Frame<B>,
+) {
+    use tui::{
+        layout as l,
+        style::{Color, Style},
+        text::{Span, Spans},
+        widgets as w,
+    };
 
-        fn make_key_value(key: &str, value: String) -> Spans {
-            Spans(vec![
-                Span::styled(key, Style::default().fg(Color::DarkGray)),
-                Span::raw(value),
-            ])
-        }
+    fn make_key_value(key: &str, value: String) -> Spans {
+        Spans(vec![
+            Span::styled(key, Style::default().fg(Color::DarkGray)),
+            Span::raw(value),
+        ])
+    }
 
-        let grid = self.current();
-        let grid_size = grid.size();
+    let grid = sim.current();
+    let grid_size = grid.size();
 
-        let top_rects = l::Layout::default()
-            .direction(l::Direction::Horizontal)
+    let top_rects = l::Layout::default()
+        .direction(l::Direction::Horizontal)
+        .constraints(
+            [
+                l::Constraint::Min(grid_size.x as _),
+                l::Constraint::Percentage(15),
+            ]
+            .as_ref(),
+        )
+        .margin(1)
+        .split(frame.size());
+
+    let grid_block = w::Block::default().borders(w::Borders::ALL).title("Grid");
+    let inner = grid_block.inner(top_rects[0]);
+    frame.render_widget(grid_block, top_rects[0]);
+    frame.render_widget(GridWidget { grid, state }, inner);
+
+    {
+        let meta_rects = l::Layout::default()
+            .direction(l::Direction::Vertical)
             .constraints(
                 [
-                    l::Constraint::Min(grid_size.x as _),
-                    l::Constraint::Percentage(15),
+                    l::Constraint::Min(3),
+                    l::Constraint::Min(5),
+                    l::Constraint::Min(4),
                 ]
                 .as_ref(),
             )
-            .margin(1)
-            .split(frame.size());
+            .split(top_rects[1]);
 
-        let grid_block = w::Block::default().borders(w::Borders::ALL).title("Grid");
-        let inner = grid_block.inner(top_rects[0]);
-        frame.render_widget(grid_block, top_rects[0]);
-        frame.render_widget(GridWidget { grid, state }, inner);
+        let para_size = w::Paragraph::new(vec![
+            make_key_value("Size = ", format!("{}x{}", grid_size.x, grid_size.y)),
+            make_key_value("Random = ", format!("{}", sim.random_seed())),
+        ])
+        .block(w::Block::default().title("Info").borders(w::Borders::ALL))
+        .wrap(w::Wrap { trim: false });
+        frame.render_widget(para_size, meta_rects[0]);
 
         {
-            let meta_rects = l::Layout::default()
+            let stat_block = w::Block::default().title("Stat").borders(w::Borders::ALL);
+            let stat_rects = l::Layout::default()
                 .direction(l::Direction::Vertical)
                 .constraints(
                     [
-                        l::Constraint::Min(3),
-                        l::Constraint::Min(5),
-                        l::Constraint::Min(4),
+                        l::Constraint::Length(1),
+                        l::Constraint::Length(1),
+                        l::Constraint::Length(1),
                     ]
                     .as_ref(),
                 )
-                .split(top_rects[1]);
+                .split(stat_block.inner(meta_rects[1]));
+            frame.render_widget(stat_block, meta_rects[1]);
 
-            let para_size = w::Paragraph::new(vec![
-                make_key_value("Size = ", format!("{}x{}", grid_size.x, grid_size.y)),
-                make_key_value("Random = ", format!("{}", self.random_seed())),
-            ])
-            .block(w::Block::default().title("Info").borders(w::Borders::ALL))
+            let para_progress = w::Paragraph::new(vec![make_key_value(
+                "Progress = ",
+                format!("{}", sim.progress()),
+            )])
             .wrap(w::Wrap { trim: false });
-            frame.render_widget(para_size, meta_rects[0]);
+            frame.render_widget(para_progress, stat_rects[0]);
 
-            {
-                let stat_block = w::Block::default().title("Stat").borders(w::Borders::ALL);
-                let stat_rects = l::Layout::default()
-                    .direction(l::Direction::Vertical)
-                    .constraints(
-                        [
-                            l::Constraint::Length(1),
-                            l::Constraint::Length(1),
-                            l::Constraint::Length(1),
-                        ]
-                        .as_ref(),
-                    )
-                    .split(stat_block.inner(meta_rects[1]));
-                frame.render_widget(stat_block, meta_rects[1]);
+            let analysis = grid.analyze();
+            let occupancy_color = if analysis.alive_ratio > sim.limits().min_extra_population {
+                Color::Blue
+            } else if analysis.alive_ratio > POPULATION_DANGER_THRESHOLD {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            let occupancy = w::Gauge::default()
+                .gauge_style(Style::default().fg(occupancy_color))
+                // Square root brings more precision to lower occupancy,
+                // which is what we mostly care about.
+                .percent((100.0 * analysis.alive_ratio.sqrt()) as u16)
+                .label(format!(
+                    "{}% alive",
+                    (100.0 * analysis.alive_ratio) as usize
+                ));
+            frame.render_widget(occupancy, stat_rects[1]);
 
-                let para_progress = w::Paragraph::new(vec![make_key_value(
-                    "Progress = ",
-                    format!("{}", self.progress()),
-                )])
+            fn get_bits(number: usize) -> usize {
+                std::mem::size_of::<usize>() * 8 - number.leading_zeros() as usize
+            }
+
+            let age_log = get_bits(sim.population().age);
+            let max_age = match sim.population().kind {
+                sim::PopulationKind::Intra => sim.limits().max_intra_population_age,
+                sim::PopulationKind::Extra => sim.limits().max_extra_population_age,
+            };
+            let max_age_log = get_bits(max_age);
+            let age_color = if age_log > 10 {
+                Color::White
+            } else if age_log > 5 {
+                Color::Gray
+            } else {
+                Color::DarkGray
+            };
+            let population_age = w::Gauge::default()
+                .gauge_style(Style::default().fg(age_color))
+                // Square root brings more precision to lower occupancy,
+                // which is what we mostly care about.
+                .percent((100 * age_log / max_age_log) as u16)
+                .label(format!("{} age", age_log));
+            frame.render_widget(population_age, stat_rects[2]);
+        }
+
+        if let Some(coords) = state.selection {
+            let x = coords.x - inner.x as grid::Coordinate;
+            let y = coords.y - inner.y as grid::Coordinate;
+            let mut text = vec![make_key_value("Coord = ", format!("{}x{}", x, y))];
+            if let Some(cell) = grid.get(x, y) {
+                text.push(make_key_value("Age = ", format!("{}", cell.age.get())));
+            }
+            let para_selection = w::Paragraph::new(text)
+                .block(w::Block::default().title("Cell").borders(w::Borders::ALL))
                 .wrap(w::Wrap { trim: false });
-                frame.render_widget(para_progress, stat_rects[0]);
-
-                let analysis = grid.analyze();
-                let occupancy_color = if analysis.alive_ratio > self.limits().min_extra_population {
-                    Color::Blue
-                } else if analysis.alive_ratio > POPULATION_DANGER_THRESHOLD {
-                    Color::Green
-                } else {
-                    Color::Red
-                };
-                let occupancy = w::Gauge::default()
-                    .gauge_style(Style::default().fg(occupancy_color))
-                    // Square root brings more precision to lower occupancy,
-                    // which is what we mostly care about.
-                    .percent((100.0 * analysis.alive_ratio.sqrt()) as u16)
-                    .label(format!(
-                        "{}% alive",
-                        (100.0 * analysis.alive_ratio) as usize
-                    ));
-                frame.render_widget(occupancy, stat_rects[1]);
-
-                fn get_bits(number: usize) -> usize {
-                    std::mem::size_of::<usize>() * 8 - number.leading_zeros() as usize
-                }
-
-                let age_log = get_bits(self.population().age);
-                let max_age = match self.population().kind {
-                    sim::PopulationKind::Intra => self.limits().max_intra_population_age,
-                    sim::PopulationKind::Extra => self.limits().max_extra_population_age,
-                };
-                let max_age_log = get_bits(max_age);
-                let age_color = if age_log > 10 {
-                    Color::White
-                } else if age_log > 5 {
-                    Color::Gray
-                } else {
-                    Color::DarkGray
-                };
-                let population_age = w::Gauge::default()
-                    .gauge_style(Style::default().fg(age_color))
-                    // Square root brings more precision to lower occupancy,
-                    // which is what we mostly care about.
-                    .percent((100 * age_log / max_age_log) as u16)
-                    .label(format!("{} age", age_log));
-                frame.render_widget(population_age, stat_rects[2]);
-            }
-
-            if let Some(coords) = state.selection {
-                let x = coords.x - inner.x as grid::Coordinate;
-                let y = coords.y - inner.y as grid::Coordinate;
-                let mut text = vec![make_key_value("Coord = ", format!("{}x{}", x, y))];
-                if let Some(cell) = grid.get(x, y) {
-                    text.push(make_key_value("Age = ", format!("{}", cell.age.get())));
-                }
-                let para_selection = w::Paragraph::new(text)
-                    .block(w::Block::default().title("Cell").borders(w::Borders::ALL))
-                    .wrap(w::Wrap { trim: false });
-                frame.render_widget(para_selection, meta_rects[2]);
-            }
+            frame.render_widget(para_selection, meta_rects[2]);
         }
     }
 }
 
-impl lab::Laboratory {
-    fn draw<B: tui::backend::Backend>(&self, frame: &mut tui::Frame<B>) {
-        use tui::{
-            layout as l,
-            style::{Color, Style},
-            text::{Span, Spans},
-            widgets as w,
-        };
+fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Frame<B>) {
+    use tui::{
+        layout as l,
+        style::{Color, Style},
+        text::{Span, Spans},
+        widgets as w,
+    };
 
-        let experiments = self.experiments();
-        let list_items = experiments
-            .iter()
-            .map(|experiment| {
-                let mut spans = vec![
-                    Span::styled(
-                        format!("[{}]", experiment.id),
-                        Style::default().fg(Color::White),
-                    ),
-                    Span::styled(
-                        format!(" - step {}", experiment.steps),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ];
-                if let Some(conclusion) = experiment.conclusion {
-                    spans.push(Span::raw(" ("));
-                    spans.push(Span::styled(
-                        format!("{:?}", conclusion),
-                        Style::default().fg(Color::Blue),
-                    ));
-                    spans.push(Span::raw(") - "));
-                    spans.push(Span::styled(
-                        format!("fit {}", experiment.fit),
-                        Style::default().fg(Color::Yellow),
-                    ));
-                }
-                w::ListItem::new(vec![Spans(spans)])
-            })
-            .collect::<Vec<_>>();
+    let experiments = lab.experiments();
+    let list_items = experiments
+        .iter()
+        .map(|experiment| {
+            let mut spans = vec![
+                Span::styled(
+                    format!("[{}]", experiment.id),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!(" - step {}", experiment.steps),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ];
+            if let Some(conclusion) = experiment.conclusion {
+                spans.push(Span::raw(" ("));
+                spans.push(Span::styled(
+                    format!("{:?}", conclusion),
+                    Style::default().fg(Color::Blue),
+                ));
+                spans.push(Span::raw(") - "));
+                spans.push(Span::styled(
+                    format!("fit {}", experiment.fit),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            w::ListItem::new(vec![Spans(spans)])
+        })
+        .collect::<Vec<_>>();
 
-        let experiment_list = w::List::new(list_items)
-            .block(
-                w::Block::default()
-                    .borders(w::Borders::ALL)
-                    .title("Experiments"),
-            )
-            .start_corner(l::Corner::TopLeft);
+    let experiment_list = w::List::new(list_items)
+        .block(
+            w::Block::default()
+                .borders(w::Borders::ALL)
+                .title("Experiments"),
+        )
+        .start_corner(l::Corner::TopLeft);
 
-        let top_rects = l::Layout::default()
-            .direction(l::Direction::Vertical)
-            .constraints(
-                [
-                    l::Constraint::Length(1),
-                    l::Constraint::Min(experiments.len() as u16),
-                ]
-                .as_ref(),
-            )
-            .margin(1)
-            .split(frame.size());
+    let top_rects = l::Layout::default()
+        .direction(l::Direction::Vertical)
+        .constraints(
+            [
+                l::Constraint::Length(1),
+                l::Constraint::Min(experiments.len() as u16),
+            ]
+            .as_ref(),
+        )
+        .margin(1)
+        .split(frame.size());
 
-        let progress = w::Gauge::default()
-            .gauge_style(Style::default().fg(Color::White))
-            .percent(self.progress_percent() as u16);
-        frame.render_widget(progress, top_rects[0]);
-        frame.render_widget(experiment_list, top_rects[1]);
-    }
+    let progress = w::Gauge::default()
+        .gauge_style(Style::default().fg(Color::White))
+        .percent(lab.progress_percent() as u16);
+    frame.render_widget(progress, top_rects[0]);
+    frame.render_widget(experiment_list, top_rects[1]);
 }
 
 enum Mode {
@@ -336,7 +334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let reason = match mode {
         Mode::Play { mut sim, mut state } => {
-            terminal.draw(|f| sim.draw(&state, f))?;
+            terminal.draw(|f| draw_sim(&sim, &state, f))?;
             loop {
                 use crossterm::event as ev;
                 match crossterm::event::read() {
@@ -383,11 +381,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                terminal.draw(|f| sim.draw(&state, f))?;
+                terminal.draw(|f| draw_sim(&sim, &state, f))?;
             }
         }
         Mode::Find(mut lab) => {
-            terminal.draw(|f| lab.draw(f))?;
+            terminal.draw(|f| draw_lab(&lab, f))?;
             loop {
                 use crossterm::event as ev;
 
@@ -421,7 +419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match lab.update() {
                     lab::LabResult::Normal => {
-                        terminal.draw(|f| lab.draw(f))?;
+                        terminal.draw(|f| draw_lab(&lab, f))?;
                     }
                     lab::LabResult::Found(snap) => {
                         let file = File::create("finding.ron").unwrap();
