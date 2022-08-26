@@ -276,8 +276,52 @@ enum ExitReason {
     Finding,
 }
 
+struct Output {
+    terminal: tui::Terminal<tui::backend::CrosstermBackend<std::io::Stdout>>,
+}
+
+impl Output {
+    fn grab() -> Result<Self, std::io::Error> {
+        use crossterm::ExecutableCommand as _;
+
+        let mut stdout = std::io::stdout();
+        stdout.execute(crossterm::terminal::EnterAlternateScreen)?;
+        stdout.execute(crossterm::event::EnableMouseCapture)?;
+        crossterm::terminal::enable_raw_mode()?;
+
+        let backend = tui::backend::CrosstermBackend::new(stdout);
+        let mut terminal = tui::Terminal::new(backend)?;
+        terminal.hide_cursor()?;
+        Ok(Self { terminal })
+    }
+
+    fn release(&mut self) -> Result<(), std::io::Error> {
+        use crossterm::ExecutableCommand as _;
+
+        if std::thread::panicking() {
+            // give the opportunity to see the result
+            let _ = crossterm::event::read();
+        }
+
+        crossterm::terminal::disable_raw_mode()?;
+        self.terminal
+            .backend_mut()
+            .execute(crossterm::event::DisableMouseCapture)?;
+        self.terminal
+            .backend_mut()
+            .execute(crossterm::terminal::LeaveAlternateScreen)?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use crossterm::ExecutableCommand as _;
     use std::{fs::File, path::PathBuf};
 
     const MY_NAME: &str = "seeker";
@@ -323,130 +367,124 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut stdout = std::io::stdout();
-    stdout.execute(crossterm::terminal::EnterAlternateScreen)?;
-    stdout.execute(crossterm::event::EnableMouseCapture)?;
-    crossterm::terminal::enable_raw_mode()?;
-
-    let backend = tui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = tui::Terminal::new(backend)?;
-    terminal.hide_cursor()?;
-
-    let reason = match mode {
-        Mode::Play { mut sim, mut state } => {
-            terminal.draw(|f| draw_sim(&sim, &state, f))?;
-            loop {
-                use crossterm::event as ev;
-                match crossterm::event::read() {
-                    Err(_) => break ExitReason::Error,
-                    Ok(ev::Event::Resize(..)) => {}
-                    Ok(ev::Event::Key(event)) => match event.code {
-                        ev::KeyCode::Esc => {
-                            break ExitReason::Quit;
+    let reason = {
+        let mut output = Output::grab()?;
+        match mode {
+            Mode::Play { mut sim, mut state } => {
+                output.terminal.draw(|f| draw_sim(&sim, &state, f))?;
+                loop {
+                    use crossterm::event as ev;
+                    match crossterm::event::read() {
+                        Err(_) => break ExitReason::Error,
+                        Ok(ev::Event::Resize(..)) => {}
+                        Ok(ev::Event::Key(event)) => match event.code {
+                            ev::KeyCode::Esc => {
+                                break ExitReason::Quit;
+                            }
+                            ev::KeyCode::Char('s') => {
+                                let snap = sim.save_snap();
+                                let steps = sim.progress();
+                                if let Ok(file) = File::create(format!("step-{}.ron", steps)) {
+                                    ron::ser::to_writer_pretty(
+                                        file,
+                                        &snap,
+                                        ron::ser::PrettyConfig::default(),
+                                    )
+                                    .unwrap();
+                                }
+                            }
+                            ev::KeyCode::Char(' ') => {
+                                if let Err(conclusion) = sim.advance() {
+                                    log::info!("Conclusion: {:?}", conclusion);
+                                    break ExitReason::Done;
+                                }
+                            }
+                            _ => continue,
+                        },
+                        Ok(ev::Event::Mouse(ev::MouseEvent {
+                            kind: ev::MouseEventKind::Down(_),
+                            column,
+                            row,
+                            modifiers: _,
+                        })) => {
+                            let new = Some(grid::Coordinates {
+                                x: column as _,
+                                y: row as _,
+                            });
+                            state.selection = if state.selection == new { None } else { new };
                         }
-                        ev::KeyCode::Char('s') => {
-                            let snap = sim.save_snap();
-                            let steps = sim.progress();
-                            if let Ok(file) = File::create(format!("step-{}.ron", steps)) {
+                        Ok(ev::Event::Mouse(..)) => {
+                            continue;
+                        }
+                    }
+
+                    output.terminal.draw(|f| draw_sim(&sim, &state, f))?;
+                }
+            }
+            Mode::Find(mut lab) => {
+                output.terminal.draw(|f| draw_lab(&lab, f))?;
+                loop {
+                    use crossterm::event as ev;
+
+                    let event = match crossterm::event::poll(std::time::Duration::from_millis(100))
+                    {
+                        Ok(true) => crossterm::event::read(),
+                        Ok(false) => Ok(ev::Event::Resize(0, 0)),
+                        Err(_) => break ExitReason::Error,
+                    };
+
+                    match event {
+                        Err(_) => break ExitReason::Error,
+                        Ok(ev::Event::Resize(..)) => {}
+                        Ok(ev::Event::Key(event)) => match event.code {
+                            ev::KeyCode::Esc => {
+                                let snap = lab.best_candidate();
+                                let file = File::create("candidate.ron").unwrap();
                                 ron::ser::to_writer_pretty(
                                     file,
-                                    &snap,
+                                    snap,
                                     ron::ser::PrettyConfig::default(),
                                 )
                                 .unwrap();
+                                break ExitReason::Quit;
                             }
+                            _ => {}
+                        },
+                        Ok(ev::Event::Mouse(..)) => {
+                            continue;
                         }
-                        ev::KeyCode::Char(' ') => {
-                            if let Err(conclusion) = sim.advance() {
-                                log::info!("Conclusion: {:?}", conclusion);
-                                break ExitReason::Done;
-                            }
+                    }
+
+                    match lab.update() {
+                        lab::LabResult::Normal => {
+                            output.terminal.draw(|f| draw_lab(&lab, f))?;
                         }
-                        _ => continue,
-                    },
-                    Ok(ev::Event::Mouse(ev::MouseEvent {
-                        kind: ev::MouseEventKind::Down(_),
-                        column,
-                        row,
-                        modifiers: _,
-                    })) => {
-                        let new = Some(grid::Coordinates {
-                            x: column as _,
-                            y: row as _,
-                        });
-                        state.selection = if state.selection == new { None } else { new };
-                    }
-                    Ok(ev::Event::Mouse(..)) => {
-                        continue;
-                    }
-                }
-
-                terminal.draw(|f| draw_sim(&sim, &state, f))?;
-            }
-        }
-        Mode::Find(mut lab) => {
-            terminal.draw(|f| draw_lab(&lab, f))?;
-            loop {
-                use crossterm::event as ev;
-
-                let event = match crossterm::event::poll(std::time::Duration::from_millis(100)) {
-                    Ok(true) => crossterm::event::read(),
-                    Ok(false) => Ok(ev::Event::Resize(0, 0)),
-                    Err(_) => break ExitReason::Error,
-                };
-
-                match event {
-                    Err(_) => break ExitReason::Error,
-                    Ok(ev::Event::Resize(..)) => {}
-                    Ok(ev::Event::Key(event)) => match event.code {
-                        ev::KeyCode::Esc => {
+                        lab::LabResult::Found(snap) => {
+                            let file = File::create("finding.ron").unwrap();
+                            ron::ser::to_writer_pretty(
+                                file,
+                                &snap,
+                                ron::ser::PrettyConfig::default(),
+                            )
+                            .unwrap();
+                            break ExitReason::Finding;
+                        }
+                        lab::LabResult::End => {
                             let snap = lab.best_candidate();
                             let file = File::create("candidate.ron").unwrap();
                             ron::ser::to_writer_pretty(
                                 file,
-                                snap,
+                                &snap,
                                 ron::ser::PrettyConfig::default(),
                             )
                             .unwrap();
-                            break ExitReason::Quit;
+                            break ExitReason::Done;
                         }
-                        _ => {}
-                    },
-                    Ok(ev::Event::Mouse(..)) => {
-                        continue;
-                    }
-                }
-
-                match lab.update() {
-                    lab::LabResult::Normal => {
-                        terminal.draw(|f| draw_lab(&lab, f))?;
-                    }
-                    lab::LabResult::Found(snap) => {
-                        let file = File::create("finding.ron").unwrap();
-                        ron::ser::to_writer_pretty(file, &snap, ron::ser::PrettyConfig::default())
-                            .unwrap();
-                        break ExitReason::Finding;
-                    }
-                    lab::LabResult::End => {
-                        let snap = lab.best_candidate();
-                        let file = File::create("candidate.ron").unwrap();
-                        ron::ser::to_writer_pretty(file, &snap, ron::ser::PrettyConfig::default())
-                            .unwrap();
-                        break ExitReason::Done;
                     }
                 }
             }
         }
     };
-
-    crossterm::terminal::disable_raw_mode()?;
-    terminal
-        .backend_mut()
-        .execute(crossterm::event::DisableMouseCapture)?;
-    terminal
-        .backend_mut()
-        .execute(crossterm::terminal::LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
 
     println!("{:?}", reason);
     Ok(())

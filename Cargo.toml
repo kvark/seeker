@@ -7,7 +7,7 @@ publish = false
 [lib]
 
 [[bin]]
-name = "main"
+name = "seeker"
 path = "src/main.rs"
 
 [[bench]]
