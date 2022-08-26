@@ -83,8 +83,19 @@ impl Laboratory {
     pub fn add_experiment(&mut self, snap: Snap) {
         let id = self.next_id;
         self.next_id += 1;
-        let mut sim = Simulation::new(&snap);
         let sender = self.sender_origin.clone();
+
+        let mut sim = match Simulation::new(&snap) {
+            Ok(sim) => sim,
+            Err(_e) => {
+                let _ = sender.send(TaskStatus {
+                    experiment_id: id,
+                    step: 0,
+                    conclusion: Some(Conclusion::Crash),
+                });
+                return;
+            }
+        };
 
         self.experiments.push(Experiment {
             id,
@@ -140,6 +151,7 @@ impl Laboratory {
                         return LabResult::Found(experiment.snap.clone());
                     }
                     Conclusion::Stable(PopulationKind::Extra) => power,
+                    Conclusion::Crash => 0,
                 };
             }
         }

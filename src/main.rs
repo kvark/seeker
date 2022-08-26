@@ -349,7 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mode = match command.as_str() {
         PLAY_COMMAND => Mode::Play {
-            sim: sim::Simulation::new(&init_snap),
+            sim: sim::Simulation::new(&init_snap).unwrap(),
             state: SimState::default(),
         },
         FIND_COMMAND => {

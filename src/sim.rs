@@ -63,7 +63,7 @@ impl Rules {
         rules
     }
 
-    fn get_sum(&self) -> Weight {
+    fn weight_sum(&self) -> Weight {
         self.kernel.values().cloned().sum::<Weight>()
     }
 
@@ -71,7 +71,7 @@ impl Rules {
         if self.kernel.get(&Coordinates::default()).is_some() {
             return false;
         }
-        let sum = self.get_sum() as usize;
+        let sum = self.weight_sum() as usize;
         if self.spawn.len() <= sum || !self.spawn.iter().all(|&prob| 0.0 <= prob && prob <= 1.0) {
             return false;
         }
@@ -93,7 +93,7 @@ pub enum Data {
 }
 
 #[derive(Debug)]
-enum DataParseError {
+pub enum DataParseError {
     UnknownSymbol(char),
     WrongLineLength,
 }
@@ -179,9 +179,10 @@ pub struct HumanRules {
 }
 
 #[derive(Debug)]
-enum RulesParseError {
+pub enum RulesParseError {
     UnknownSymbol(char),
     MissingKernelCenter,
+    WeightOutOfBounds(Weight),
 }
 
 impl HumanRules {
@@ -221,15 +222,21 @@ impl HumanRules {
             }
         }
 
-        let sum = rules.get_sum() as usize;
+        let sum = rules.weight_sum() as usize;
         rules.spawn.resize(sum + 1, 0.0);
         rules.keep.resize(sum + 1, 0.0);
 
         for (&weight, &prob) in self.spawn.iter() {
-            rules.spawn[weight as usize] = prob;
+            *rules
+                .spawn
+                .get_mut(weight as usize)
+                .ok_or(RulesParseError::WeightOutOfBounds(weight))? = prob;
         }
         for (&weight, &prob) in self.keep.iter() {
-            rules.keep[weight as usize] = prob;
+            *rules
+                .keep
+                .get_mut(weight as usize)
+                .ok_or(RulesParseError::WeightOutOfBounds(weight))? = prob;
         }
 
         if !rules.are_valid() {
@@ -301,6 +308,7 @@ pub enum Conclusion {
     Extinct,
     Indeterminate,
     Stable(PopulationKind),
+    Crash,
 }
 
 pub struct Simulation {
@@ -314,15 +322,31 @@ pub struct Simulation {
     population: Population,
 }
 
+#[derive(Debug)]
+pub enum SnapError {
+    RulesParse(RulesParseError),
+    DataParse(DataParseError),
+}
+impl From<RulesParseError> for SnapError {
+    fn from(error: RulesParseError) -> Self {
+        Self::RulesParse(error)
+    }
+}
+impl From<DataParseError> for SnapError {
+    fn from(error: DataParseError) -> Self {
+        Self::DataParse(error)
+    }
+}
+
 impl Simulation {
-    pub fn new(snap: &Snap) -> Self {
+    pub fn new(snap: &Snap) -> Result<Self, SnapError> {
         let mut rng = rand::SeedableRng::seed_from_u64(snap.random_seed);
-        let rules = snap.rules.parse().unwrap();
-        let grid = snap.data.parse(&mut rng).unwrap();
+        let rules = snap.rules.parse()?;
+        let grid = snap.data.parse(&mut rng)?;
         let size = grid.size();
         assert!(snap.limits.are_valid());
 
-        Self {
+        Ok(Self {
             grids: [grid, Grid::new(size)],
             grid_index: 0,
             rules,
@@ -334,7 +358,7 @@ impl Simulation {
                 kind: PopulationKind::Extra,
                 age: 0,
             },
-        }
+        })
     }
 
     pub fn save_snap(&self) -> Snap {
