@@ -2,7 +2,7 @@ use crate::sim::{
     Conclusion, Data, PopulationKind, Probability, ProbabilityTable, Simulation, Snap, Weight,
 };
 use rand::{rngs::ThreadRng, Rng as _};
-use std::{mem, ops::Range, sync::Arc};
+use std::{fs, mem, ops::Range, path, sync::Arc};
 
 const UPDATE_FREQUENCY: usize = 64;
 const CHANNEL_BOUND: usize = 200;
@@ -42,16 +42,14 @@ pub struct Laboratory {
     _workers: Vec<choir::WorkerHandle>,
     experiments: Vec<Experiment>,
     next_id: usize,
-}
-
-pub enum LabResult {
-    Normal,
-    Found(Snap),
-    End,
+    active_dir: path::PathBuf,
 }
 
 impl Laboratory {
-    pub fn new(config: Configuration) -> Self {
+    pub fn new(config: Configuration, active_dir_ref: impl AsRef<path::Path>) -> Self {
+        let active_dir = path::PathBuf::from(active_dir_ref.as_ref());
+        fs::create_dir_all(active_dir_ref).unwrap();
+
         let choir = choir::Choir::new();
         let w1 = choir.add_worker("w1");
         let w2 = choir.add_worker("w2");
@@ -65,6 +63,7 @@ impl Laboratory {
             _workers: vec![w1, w2],
             experiments: Vec::new(),
             next_id: 0,
+            active_dir,
         }
     }
 
@@ -76,25 +75,20 @@ impl Laboratory {
         self.next_id * 100 / self.config.max_iterations
     }
 
-    pub fn best_candidate(&self) -> &Snap {
-        &self.experiments[0].snap
-    }
-
     pub fn add_experiment(&mut self, snap: Snap) {
         let id = self.next_id;
         self.next_id += 1;
         let sender = self.sender_origin.clone();
 
+        {
+            let name = format!("{}.ron", id);
+            let file = fs::File::create(self.active_dir.join(name)).unwrap();
+            ron::ser::to_writer_pretty(file, &snap, ron::ser::PrettyConfig::default()).unwrap();
+        }
+
         let mut sim = match Simulation::new(&snap) {
             Ok(sim) => sim,
-            Err(_e) => {
-                let _ = sender.send(TaskStatus {
-                    experiment_id: id,
-                    step: 0,
-                    conclusion: Some(Conclusion::Crash),
-                });
-                return;
-            }
+            Err(_e) => return,
         };
 
         self.experiments.push(Experiment {
@@ -132,7 +126,7 @@ impl Laboratory {
         });
     }
 
-    pub fn update(&mut self) -> LabResult {
+    pub fn update(&mut self) -> bool {
         while let Ok(progress) = self.receiver.try_recv() {
             let mut experiment = self
                 .experiments
@@ -141,15 +135,16 @@ impl Laboratory {
                 .unwrap();
             assert!(experiment.conclusion.is_none());
             experiment.steps = progress.step;
+
             if let Some(conclusion) = progress.conclusion {
                 let power = mem::size_of::<usize>() * 8 - progress.step.leading_zeros() as usize;
                 experiment.conclusion = Some(conclusion);
                 experiment.fit = match conclusion {
                     Conclusion::Extinct => power,
-                    Conclusion::Indeterminate => 2 * power,
-                    Conclusion::Stable(PopulationKind::Intra) => {
-                        return LabResult::Found(experiment.snap.clone());
+                    Conclusion::Indeterminate { avg_alive_ratio } => {
+                        50 + ((0.5 - avg_alive_ratio) * 60.0) as usize
                     }
+                    Conclusion::Stable(PopulationKind::Intra) => 100 - power,
                     Conclusion::Stable(PopulationKind::Extra) => power,
                     Conclusion::Crash => 0,
                 };
@@ -168,7 +163,7 @@ impl Laboratory {
 
         if self.next_id >= self.config.max_iterations {
             if self.experiments.len() == self.config.max_active {
-                return LabResult::End;
+                return false;
             }
         } else if self.experiments.len() < self.config.max_in_flight {
             let fit_sum = self.experiments.iter().map(|ex| ex.fit).sum::<usize>();
@@ -194,7 +189,7 @@ impl Laboratory {
             self.add_experiment(snap);
         }
 
-        LabResult::Normal
+        true
     }
 
     fn mutate_probabilities(&mut self, probabilities: &mut ProbabilityTable) {

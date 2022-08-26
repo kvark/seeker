@@ -273,7 +273,6 @@ enum ExitReason {
     Error,
     Quit,
     Done,
-    Finding,
 }
 
 struct Output {
@@ -357,7 +356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_path.push("data");
             config_path.push("config.ron");
             let config = ron::de::from_reader(File::open(config_path).unwrap()).unwrap();
-            let mut lab = lab::Laboratory::new(config);
+            let mut lab = lab::Laboratory::new(config, "data/active/");
             lab.add_experiment(init_snap);
             Mode::Find(lab)
         }
@@ -437,17 +436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(_) => break ExitReason::Error,
                         Ok(ev::Event::Resize(..)) => {}
                         Ok(ev::Event::Key(event)) => match event.code {
-                            ev::KeyCode::Esc => {
-                                let snap = lab.best_candidate();
-                                let file = File::create("candidate.ron").unwrap();
-                                ron::ser::to_writer_pretty(
-                                    file,
-                                    snap,
-                                    ron::ser::PrettyConfig::default(),
-                                )
-                                .unwrap();
-                                break ExitReason::Quit;
-                            }
+                            ev::KeyCode::Esc => break ExitReason::Quit,
                             _ => {}
                         },
                         Ok(ev::Event::Mouse(..)) => {
@@ -455,31 +444,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    match lab.update() {
-                        lab::LabResult::Normal => {
-                            output.terminal.draw(|f| draw_lab(&lab, f))?;
-                        }
-                        lab::LabResult::Found(snap) => {
-                            let file = File::create("finding.ron").unwrap();
-                            ron::ser::to_writer_pretty(
-                                file,
-                                &snap,
-                                ron::ser::PrettyConfig::default(),
-                            )
-                            .unwrap();
-                            break ExitReason::Finding;
-                        }
-                        lab::LabResult::End => {
-                            let snap = lab.best_candidate();
-                            let file = File::create("candidate.ron").unwrap();
-                            ron::ser::to_writer_pretty(
-                                file,
-                                &snap,
-                                ron::ser::PrettyConfig::default(),
-                            )
-                            .unwrap();
-                            break ExitReason::Done;
-                        }
+                    if lab.update() {
+                        output.terminal.draw(|f| draw_lab(&lab, f))?;
+                    } else {
+                        break ExitReason::Done;
                     }
                 }
             }

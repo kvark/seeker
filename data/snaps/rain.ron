@@ -1,0 +1,35 @@
+(
+    data: Random(
+        width: 128,
+        height: 128,
+        alive_ratio: 0.5,
+    ),
+    rules: (
+        kernel: [
+            "00000",
+            "01110",
+            "01X10",
+            "01210",
+            "00000",
+        ],
+        spawn: {
+            8: 0.5,
+            2: 0.05,
+            4: 0.05,
+            3: 0.95,
+        },
+        keep: {
+            2: 0.95,
+            7: 0.5,
+            4: 0.05,
+            3: 0.95,
+        },
+    ),
+    random_seed: 0,
+    limits: (
+        min_extra_population: 0.1,
+        max_steps: 12288,
+        max_intra_population_age: 4096,
+        max_extra_population_age: 256,
+    ),
+)

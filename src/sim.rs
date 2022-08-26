@@ -306,7 +306,7 @@ pub struct Population {
 #[derive(Clone, Copy, Debug)]
 pub enum Conclusion {
     Extinct,
-    Indeterminate,
+    Indeterminate { avg_alive_ratio: f32 },
     Stable(PopulationKind),
     Crash,
 }
@@ -320,6 +320,7 @@ pub struct Simulation {
     random_seed: u64,
     step: usize,
     population: Population,
+    sum_alive_ratio: f32,
 }
 
 #[derive(Debug)]
@@ -358,6 +359,7 @@ impl Simulation {
                 kind: PopulationKind::Extra,
                 age: 0,
             },
+            sum_alive_ratio: 0.0,
         })
     }
 
@@ -459,6 +461,8 @@ impl Simulation {
         }
 
         let analysis = grid.analyze();
+        self.sum_alive_ratio += analysis.alive_ratio;
+
         let (kind, max_age) = if analysis.alive_ratio > self.limits.min_extra_population {
             (PopulationKind::Extra, self.limits.max_extra_population_age)
         } else if analysis.alive_ratio > 0.0 {
@@ -470,9 +474,12 @@ impl Simulation {
             self.population.age = 0;
             self.population.kind = kind;
         }
+
         self.population.age += 1;
         if self.step > self.limits.max_steps {
-            Err(Conclusion::Indeterminate)
+            Err(Conclusion::Indeterminate {
+                avg_alive_ratio: self.sum_alive_ratio / self.step as f32,
+            })
         } else if self.population.age > max_age {
             Err(Conclusion::Stable(kind))
         } else {
