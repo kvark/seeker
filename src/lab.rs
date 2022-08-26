@@ -2,7 +2,7 @@ use crate::sim::{
     Conclusion, Data, PopulationKind, Probability, ProbabilityTable, Simulation, Snap, Weight,
 };
 use rand::{rngs::ThreadRng, Rng as _};
-use std::{mem, ops::Range};
+use std::{mem, ops::Range, sync::Arc};
 
 const UPDATE_FREQUENCY: usize = 64;
 const CHANNEL_BOUND: usize = 200;
@@ -36,7 +36,7 @@ pub struct Laboratory {
     rng: ThreadRng,
     sender_origin: crossbeam_channel::Sender<TaskStatus>,
     receiver: crossbeam_channel::Receiver<TaskStatus>,
-    choir: choir::Choir,
+    choir: Arc<choir::Choir>,
     // Better destroy them after the channel, so that workers
     // can see that this end is gone.
     _workers: Vec<choir::WorkerHandle>,
@@ -52,7 +52,7 @@ pub enum LabResult {
 
 impl Laboratory {
     pub fn new(config: Configuration) -> Self {
-        let mut choir = choir::Choir::new();
+        let choir = choir::Choir::new();
         let w1 = choir.add_worker("w1");
         let w2 = choir.add_worker("w2");
         let (sender_origin, receiver) = crossbeam_channel::bounded(CHANNEL_BOUND);
@@ -94,7 +94,7 @@ impl Laboratory {
             fit: 0,
         });
 
-        self.choir.add_task(move || loop {
+        self.choir.spawn("advance").init(move |_| loop {
             match sim.advance() {
                 Ok(_) if sim.progress() % UPDATE_FREQUENCY == 0 => {
                     if sender

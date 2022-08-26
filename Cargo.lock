@@ -72,9 +72,8 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "choir"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed304f0a9e2b772acee6f0e690cbd16bcc8594a92b3885eba4e0620cd82cfe45"
+version = "0.5.0"
+source = "git+https://github.com/kvark/choir#a127e4fd5cb66b94401d01a900818319edc48279"
 dependencies = [
  "crossbeam-deque",
  "log",

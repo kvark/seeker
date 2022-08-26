@@ -15,7 +15,7 @@ name = "main"
 harness = false
 
 [dependencies]
-choir = "0.4"
+choir = { git = "https://github.com/kvark/choir" }
 crossbeam-channel = "0.5"
 crossterm = "0.23"
 log = "0.4"
