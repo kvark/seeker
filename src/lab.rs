@@ -2,12 +2,12 @@ use crate::sim::{
     Conclusion, Data, PopulationKind, Probability, ProbabilityTable, Simulation, Snap, Weight,
 };
 use rand::{rngs::ThreadRng, Rng as _};
-use std::{fs, mem, ops::Range, path, sync::Arc};
+use std::{fs, io::Write as _, mem, ops::Range, path, sync::Arc};
 
 const UPDATE_FREQUENCY: usize = 64;
 const CHANNEL_BOUND: usize = 200;
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Configuration {
     max_iterations: usize,
     max_active: usize,
@@ -43,12 +43,19 @@ pub struct Laboratory {
     experiments: Vec<Experiment>,
     next_id: usize,
     active_dir: path::PathBuf,
+    log: fs::File,
 }
 
 impl Laboratory {
     pub fn new(config: Configuration, active_dir_ref: impl AsRef<path::Path>) -> Self {
         let active_dir = path::PathBuf::from(active_dir_ref.as_ref());
         fs::create_dir_all(active_dir_ref).unwrap();
+        {
+            let file = fs::File::create(active_dir.join("config.ron")).unwrap();
+            ron::ser::to_writer_pretty(file, &config, ron::ser::PrettyConfig::default()).unwrap();
+        }
+        let mut log = fs::File::create(active_dir.join("find.log")).unwrap();
+        writeln!(log, "Seeker {}", env!("CARGO_PKG_VERSION")).unwrap();
 
         let choir = choir::Choir::new();
         let w1 = choir.add_worker("w1");
@@ -64,6 +71,7 @@ impl Laboratory {
             experiments: Vec::new(),
             next_id: 0,
             active_dir,
+            log,
         }
     }
 
@@ -75,20 +83,26 @@ impl Laboratory {
         self.next_id * 100 / self.config.max_iterations
     }
 
-    pub fn add_experiment(&mut self, snap: Snap) {
+    pub fn add_experiment(&mut self, snap: Snap, parent_id: usize) {
         let id = self.next_id;
         self.next_id += 1;
         let sender = self.sender_origin.clone();
 
         {
-            let name = format!("{}.ron", id);
+            let name = format!("e{}.ron", id);
             let file = fs::File::create(self.active_dir.join(name)).unwrap();
             ron::ser::to_writer_pretty(file, &snap, ron::ser::PrettyConfig::default()).unwrap();
         }
 
         let mut sim = match Simulation::new(&snap) {
-            Ok(sim) => sim,
-            Err(_e) => return,
+            Ok(sim) => {
+                writeln!(self.log, "Mutate E[{}] -> E[{}]", parent_id, self.next_id).unwrap();
+                sim
+            }
+            Err(e) => {
+                writeln!(self.log, "Skip E[{}]: {:?}", self.next_id, e).unwrap();
+                return;
+            }
         };
 
         self.experiments.push(Experiment {
@@ -137,6 +151,12 @@ impl Laboratory {
             experiment.steps = progress.step;
 
             if let Some(conclusion) = progress.conclusion {
+                writeln!(
+                    self.log,
+                    "Conclude E[{}] with {:?} at step {}",
+                    progress.experiment_id, conclusion, progress.step
+                )
+                .unwrap();
                 let power = mem::size_of::<usize>() * 8 - progress.step.leading_zeros() as usize;
                 experiment.conclusion = Some(conclusion);
                 experiment.fit = match conclusion {
@@ -158,6 +178,8 @@ impl Laboratory {
             .get(self.config.max_active)
             .map_or(0, |ex| ex.fit);
         let best_id = self.experiments[0].id;
+        //TODO: different policies of the experiments generation
+        // e.g. randomly choose (or resample) using `fit` as the weight
         self.experiments
             .retain(|ex| ex.conclusion.is_none() || ex.fit > retain_cutoff || ex.id == best_id);
 
@@ -168,13 +190,13 @@ impl Laboratory {
         } else if self.experiments.len() < self.config.max_in_flight {
             let fit_sum = self.experiments.iter().map(|ex| ex.fit).sum::<usize>();
 
-            let mut snap = if fit_sum > 0 {
+            let parent = if fit_sum > 0 {
                 let mut cutoff = self.rng.gen_range(0..fit_sum);
                 self.experiments
                     .iter()
                     .find_map(move |ex| {
                         if ex.fit > cutoff {
-                            Some(ex.snap.clone())
+                            Some(ex)
                         } else {
                             cutoff -= ex.fit;
                             None
@@ -182,11 +204,13 @@ impl Laboratory {
                     })
                     .unwrap()
             } else {
-                self.experiments[0].snap.clone()
+                self.experiments.first().unwrap()
             };
 
+            let mut snap = parent.snap.clone();
+            let parent_id = parent.id;
             self.mutate_snap(&mut snap);
-            self.add_experiment(snap);
+            self.add_experiment(snap, parent_id);
         }
 
         true

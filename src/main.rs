@@ -357,7 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_path.push("config.ron");
             let config = ron::de::from_reader(File::open(config_path).unwrap()).unwrap();
             let mut lab = lab::Laboratory::new(config, "data/active/");
-            lab.add_experiment(init_snap);
+            lab.add_experiment(init_snap, 0);
             Mode::Find(lab)
         }
         _ => {
@@ -373,7 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output.terminal.draw(|f| draw_sim(&sim, &state, f))?;
                 loop {
                     use crossterm::event as ev;
-                    match crossterm::event::read() {
+                    match ev::read() {
                         Err(_) => break ExitReason::Error,
                         Ok(ev::Event::Resize(..)) => {}
                         Ok(ev::Event::Key(event)) => match event.code {
@@ -425,9 +425,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     use crossterm::event as ev;
 
-                    let event = match crossterm::event::poll(std::time::Duration::from_millis(100))
-                    {
-                        Ok(true) => crossterm::event::read(),
+                    let event = match ev::poll(std::time::Duration::from_millis(100)) {
+                        Ok(true) => ev::read(),
                         Ok(false) => Ok(ev::Event::Resize(0, 0)),
                         Err(_) => break ExitReason::Error,
                     };
