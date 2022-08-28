@@ -237,7 +237,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
         .block(
             w::Block::default()
                 .borders(w::Borders::ALL)
-                .title("Experiments"),
+                .title(format!("Experiments @{}", lab.iteration())),
         )
         .start_corner(l::Corner::TopLeft);
 
@@ -253,10 +253,6 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
         .margin(1)
         .split(frame.size());
 
-    let progress = w::Gauge::default()
-        .gauge_style(Style::default().fg(Color::White))
-        .percent(lab.progress_percent() as u16);
-    frame.render_widget(progress, top_rects[0]);
     frame.render_widget(experiment_list, top_rects[1]);
 }
 
@@ -272,7 +268,7 @@ enum Mode {
 enum ExitReason {
     Error,
     Quit,
-    Done,
+    Done(sim::Conclusion),
 }
 
 struct Output {
@@ -367,12 +363,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let reason = {
+        use crossterm::event as ev;
+
         let mut output = Output::grab()?;
         match mode {
             Mode::Play { mut sim, mut state } => {
                 output.terminal.draw(|f| draw_sim(&sim, &state, f))?;
                 loop {
-                    use crossterm::event as ev;
                     match ev::read() {
                         Err(_) => break ExitReason::Error,
                         Ok(ev::Event::Resize(..)) => {}
@@ -394,8 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             ev::KeyCode::Char(' ') => {
                                 if let Err(conclusion) = sim.advance() {
-                                    log::info!("Conclusion: {:?}", conclusion);
-                                    break ExitReason::Done;
+                                    break ExitReason::Done(conclusion);
                                 }
                             }
                             _ => continue,
@@ -423,8 +419,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Mode::Find(mut lab) => {
                 output.terminal.draw(|f| draw_lab(&lab, f))?;
                 loop {
-                    use crossterm::event as ev;
-
                     let event = match ev::poll(std::time::Duration::from_millis(100)) {
                         Ok(true) => ev::read(),
                         Ok(false) => Ok(ev::Event::Resize(0, 0)),
@@ -443,11 +437,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    if lab.update() {
-                        output.terminal.draw(|f| draw_lab(&lab, f))?;
-                    } else {
-                        break ExitReason::Done;
-                    }
+                    lab.update();
+                    output.terminal.draw(|f| draw_lab(&lab, f))?;
                 }
             }
         }

@@ -9,7 +9,6 @@ const CHANNEL_BOUND: usize = 200;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Configuration {
-    max_iterations: usize,
     max_active: usize,
     max_in_flight: usize,
     size_power: Range<usize>,
@@ -75,12 +74,12 @@ impl Laboratory {
         }
     }
 
-    pub fn experiments(&self) -> &[Experiment] {
-        &self.experiments
+    pub fn iteration(&self) -> usize {
+        self.next_id
     }
 
-    pub fn progress_percent(&self) -> usize {
-        self.next_id * 100 / self.config.max_iterations
+    pub fn experiments(&self) -> &[Experiment] {
+        &self.experiments
     }
 
     pub fn add_experiment(&mut self, snap: Snap, parent_id: usize) {
@@ -140,7 +139,7 @@ impl Laboratory {
         });
     }
 
-    pub fn update(&mut self) -> bool {
+    pub fn update(&mut self) {
         while let Ok(progress) = self.receiver.try_recv() {
             let mut experiment = self
                 .experiments
@@ -183,11 +182,7 @@ impl Laboratory {
         self.experiments
             .retain(|ex| ex.conclusion.is_none() || ex.fit > retain_cutoff || ex.id == best_id);
 
-        if self.next_id >= self.config.max_iterations {
-            if self.experiments.len() == self.config.max_active {
-                return false;
-            }
-        } else if self.experiments.len() < self.config.max_in_flight {
+        if self.experiments.len() < self.config.max_in_flight {
             let fit_sum = self.experiments.iter().map(|ex| ex.fit).sum::<usize>();
 
             let parent = if fit_sum > 0 {
@@ -212,8 +207,6 @@ impl Laboratory {
             self.mutate_snap(&mut snap);
             self.add_experiment(snap, parent_id);
         }
-
-        true
     }
 
     fn mutate_probabilities(&mut self, probabilities: &mut ProbabilityTable) {

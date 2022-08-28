@@ -1,5 +1,4 @@
 (
-    max_iterations: 1000,
     max_active: 10,
     max_in_flight: 20,
     size_power: (start:6, end:8),
