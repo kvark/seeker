@@ -14,22 +14,17 @@ pub type Probability = f32;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Limits {
-    pub min_extra_population: f32,
     pub max_steps: usize,
-    pub max_intra_population_age: usize,
-    pub max_extra_population_age: usize,
+    pub max_population_variance: f32,
+    pub update_weight: f32,
 }
 
 impl Limits {
     fn are_valid(&self) -> bool {
-        if self.min_extra_population <= 0.0 || self.min_extra_population > 1.0 {
+        if self.max_population_variance <= 0.0 {
             return false;
         }
-        if self.max_steps
-            <= self
-                .max_intra_population_age
-                .max(self.max_extra_population_age)
-        {
+        if self.update_weight < 0.0 || self.update_weight > 1.0 {
             return false;
         }
         true
@@ -292,23 +287,44 @@ pub struct Snap {
     limits: Limits,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PopulationKind {
-    Intra,
-    Extra,
-}
-
-pub struct Population {
-    pub kind: PopulationKind,
-    pub age: usize,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum Conclusion {
     Extinct,
-    Indeterminate { avg_alive_ratio: f32 },
-    Stable(PopulationKind),
+    Indeterminate { alive_ratio_variance: f32 },
+    Stable { alive_ratio_average: f32 },
     Crash,
+}
+
+pub struct State {
+    pub step: usize,
+    pub alive_ratio_average: f32,
+    pub alive_ratio_variance: f32,
+}
+
+impl State {
+    fn update(&mut self, alive_ratio: f32, limits: &Limits) -> Option<Conclusion> {
+        self.step += 1;
+        let offset = alive_ratio - self.alive_ratio_average;
+        let offset_squared_rel = offset * offset / self.alive_ratio_average.max(0.01);
+        self.alive_ratio_average = limits.update_weight * alive_ratio
+            + (1.0 - limits.update_weight) * self.alive_ratio_average;
+        self.alive_ratio_variance = limits.update_weight * offset_squared_rel
+            + (1.0 - limits.update_weight) * self.alive_ratio_variance;
+
+        if self.step as f32 > 1.0 / limits.update_weight
+            && self.alive_ratio_variance < limits.max_population_variance
+        {
+            Some(Conclusion::Stable {
+                alive_ratio_average: self.alive_ratio_average,
+            })
+        } else if self.step > limits.max_steps {
+            Some(Conclusion::Indeterminate {
+                alive_ratio_variance: self.alive_ratio_variance,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 pub struct Simulation {
@@ -318,9 +334,7 @@ pub struct Simulation {
     limits: Limits,
     rng: rand::rngs::StdRng,
     random_seed: u64,
-    step: usize,
-    population: Population,
-    sum_alive_ratio: f32,
+    state: State,
 }
 
 #[derive(Debug)]
@@ -354,30 +368,28 @@ impl Simulation {
             limits: snap.limits.clone(),
             rng,
             random_seed: snap.random_seed,
-            step: 0,
-            population: Population {
-                kind: PopulationKind::Extra,
-                age: 0,
+            state: State {
+                step: 0,
+                alive_ratio_average: match snap.data {
+                    Data::Grid(_) => 0.0,
+                    Data::Random { alive_ratio, .. } => alive_ratio,
+                },
+                alive_ratio_variance: 0.0,
             },
-            sum_alive_ratio: 0.0,
         })
     }
 
     pub fn save_snap(&self) -> Snap {
         Snap {
-            data: Data::unparse(self.current()),
+            data: Data::unparse(self.grid()),
             rules: HumanRules::unparse(&self.rules),
             random_seed: self.random_seed,
             limits: self.limits.clone(),
         }
     }
 
-    pub fn progress(&self) -> usize {
-        self.step
-    }
-
-    pub fn population(&self) -> &Population {
-        &self.population
+    pub fn state(&self) -> &State {
+        &self.state
     }
 
     pub fn random_seed(&self) -> u64 {
@@ -388,18 +400,13 @@ impl Simulation {
         &self.limits
     }
 
-    pub fn current(&self) -> &Grid {
+    pub fn grid(&self) -> &Grid {
         self.grids.get(self.grid_index).unwrap()
-    }
-
-    pub fn _current_mut(&mut self) -> &mut Grid {
-        self.grids.get_mut(self.grid_index).unwrap()
     }
 
     pub fn advance(&mut self) -> Result<GridAnalysis, Conclusion> {
         let prev_index = self.grid_index;
         self.grid_index = (self.grid_index + 1) % self.grids.len();
-        self.step += 1;
 
         let (grids_before, grids_middle) = self.grids.split_at_mut(self.grid_index);
         let (grids_current, grids_after) = grids_middle.split_at_mut(1);
@@ -461,27 +468,12 @@ impl Simulation {
         }
 
         let analysis = grid.analyze();
-        self.sum_alive_ratio += analysis.alive_ratio;
-
-        let (kind, max_age) = if analysis.alive_ratio > self.limits.min_extra_population {
-            (PopulationKind::Extra, self.limits.max_extra_population_age)
-        } else if analysis.alive_ratio > 0.0 {
-            (PopulationKind::Intra, self.limits.max_intra_population_age)
-        } else {
+        if analysis.alive_ratio == 0.0 {
             return Err(Conclusion::Extinct);
-        };
-        if self.population.kind != kind {
-            self.population.age = 0;
-            self.population.kind = kind;
         }
 
-        self.population.age += 1;
-        if self.step > self.limits.max_steps {
-            Err(Conclusion::Indeterminate {
-                avg_alive_ratio: self.sum_alive_ratio / self.step as f32,
-            })
-        } else if self.population.age > max_age {
-            Err(Conclusion::Stable(kind))
+        if let Some(conclusion) = self.state.update(analysis.alive_ratio, &self.limits) {
+            Err(conclusion)
         } else {
             Ok(analysis)
         }

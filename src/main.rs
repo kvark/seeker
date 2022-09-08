@@ -1,5 +1,3 @@
-const POPULATION_DANGER_THRESHOLD: f32 = 0.02;
-
 use seeker::{grid, lab, sim};
 
 #[derive(Default)]
@@ -72,7 +70,7 @@ fn draw_sim<B: tui::backend::Backend>(
         ])
     }
 
-    let grid = sim.current();
+    let grid = sim.grid();
     let grid_size = grid.size();
 
     let top_rects = l::Layout::default()
@@ -128,56 +126,23 @@ fn draw_sim<B: tui::backend::Backend>(
                 .split(stat_block.inner(meta_rects[1]));
             frame.render_widget(stat_block, meta_rects[1]);
 
-            let para_progress = w::Paragraph::new(vec![make_key_value(
-                "Progress = ",
-                format!("{}", sim.progress()),
-            )])
-            .wrap(w::Wrap { trim: false });
-            frame.render_widget(para_progress, stat_rects[0]);
+            let state = sim.state();
+            let para_step =
+                w::Paragraph::new(vec![make_key_value("Step = ", format!("{}", state.step))])
+                    .wrap(w::Wrap { trim: false });
+            frame.render_widget(para_step, stat_rects[0]);
 
-            let analysis = grid.analyze();
-            let occupancy_color = if analysis.alive_ratio > sim.limits().min_extra_population {
-                Color::Blue
-            } else if analysis.alive_ratio > POPULATION_DANGER_THRESHOLD {
-                Color::Green
-            } else {
-                Color::Red
-            };
-            let occupancy = w::Gauge::default()
-                .gauge_style(Style::default().fg(occupancy_color))
-                // Square root brings more precision to lower occupancy,
-                // which is what we mostly care about.
-                .percent((100.0 * analysis.alive_ratio.sqrt()) as u16)
-                .label(format!(
-                    "{}% alive",
-                    (100.0 * analysis.alive_ratio) as usize
-                ));
-            frame.render_widget(occupancy, stat_rects[1]);
+            let occupancy_average = w::Gauge::default()
+                .gauge_style(Style::default().fg(Color::DarkGray))
+                .percent((100.0 * state.alive_ratio_average) as u16)
+                .label("average");
+            frame.render_widget(occupancy_average, stat_rects[1]);
 
-            fn get_bits(number: usize) -> usize {
-                std::mem::size_of::<usize>() * 8 - number.leading_zeros() as usize
-            }
-
-            let age_log = get_bits(sim.population().age);
-            let max_age = match sim.population().kind {
-                sim::PopulationKind::Intra => sim.limits().max_intra_population_age,
-                sim::PopulationKind::Extra => sim.limits().max_extra_population_age,
-            };
-            let max_age_log = get_bits(max_age);
-            let age_color = if age_log > 10 {
-                Color::White
-            } else if age_log > 5 {
-                Color::Gray
-            } else {
-                Color::DarkGray
-            };
-            let population_age = w::Gauge::default()
-                .gauge_style(Style::default().fg(age_color))
-                // Square root brings more precision to lower occupancy,
-                // which is what we mostly care about.
-                .percent((100 * age_log / max_age_log) as u16)
-                .label(format!("{} age", age_log));
-            frame.render_widget(population_age, stat_rects[2]);
+            let occupancy_deviation = w::Gauge::default()
+                .gauge_style(Style::default().fg(Color::DarkGray))
+                .percent((100.0 * state.alive_ratio_variance.sqrt()) as u16)
+                .label("deviation");
+            frame.render_widget(occupancy_deviation, stat_rects[2]);
         }
 
         if let Some(coords) = state.selection {
@@ -379,7 +344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             ev::KeyCode::Char('s') => {
                                 let snap = sim.save_snap();
-                                let steps = sim.progress();
+                                let steps = sim.state().step;
                                 if let Ok(file) = File::create(format!("step-{}.ron", steps)) {
                                     ron::ser::to_writer_pretty(
                                         file,
