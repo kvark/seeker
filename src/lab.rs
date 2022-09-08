@@ -1,6 +1,4 @@
-use crate::sim::{
-    Conclusion, Data, PopulationKind, Probability, ProbabilityTable, Simulation, Snap, Weight,
-};
+use crate::sim::{Conclusion, Data, Probability, ProbabilityTable, Simulation, Snap, Weight};
 use rand::{rngs::ThreadRng, Rng as _};
 use std::{fs, io::Write as _, mem, ops::Range, path, sync::Arc};
 
@@ -113,12 +111,13 @@ impl Laboratory {
         });
 
         self.choir.spawn("advance").init(move |_| loop {
+            let step = sim.state().step + 1;
             match sim.advance() {
-                Ok(_) if sim.progress() % UPDATE_FREQUENCY == 0 => {
+                Ok(_) if step % UPDATE_FREQUENCY == 0 => {
                     if sender
                         .send(TaskStatus {
                             experiment_id: id,
-                            step: sim.progress(),
+                            step,
                             conclusion: None,
                         })
                         .is_err()
@@ -130,7 +129,7 @@ impl Laboratory {
                 Err(conclusion) => {
                     let _ = sender.send(TaskStatus {
                         experiment_id: id,
-                        step: sim.progress(),
+                        step,
                         conclusion: Some(conclusion),
                     });
                     return;
@@ -140,31 +139,33 @@ impl Laboratory {
     }
 
     pub fn update(&mut self) {
-        while let Ok(progress) = self.receiver.try_recv() {
+        while let Ok(status) = self.receiver.try_recv() {
             let mut experiment = self
                 .experiments
                 .iter_mut()
-                .find(|exp| exp.id == progress.experiment_id)
+                .find(|exp| exp.id == status.experiment_id)
                 .unwrap();
             assert!(experiment.conclusion.is_none());
-            experiment.steps = progress.step;
+            experiment.steps = status.step;
 
-            if let Some(conclusion) = progress.conclusion {
+            if let Some(conclusion) = status.conclusion {
                 writeln!(
                     self.log,
                     "Conclude E[{}] with {:?} at step {}",
-                    progress.experiment_id, conclusion, progress.step
+                    status.experiment_id, conclusion, status.step
                 )
                 .unwrap();
-                let power = mem::size_of::<usize>() * 8 - progress.step.leading_zeros() as usize;
                 experiment.conclusion = Some(conclusion);
                 experiment.fit = match conclusion {
-                    Conclusion::Extinct => power,
-                    Conclusion::Indeterminate { avg_alive_ratio } => {
-                        50 + ((0.5 - avg_alive_ratio) * 60.0) as usize
+                    Conclusion::Extinct => {
+                        mem::size_of::<usize>() * 8 - status.step.leading_zeros() as usize
                     }
-                    Conclusion::Stable(PopulationKind::Intra) => 100 - power,
-                    Conclusion::Stable(PopulationKind::Extra) => power,
+                    Conclusion::Indeterminate {
+                        alive_ratio_variance,
+                    } => 40 - (10.0 * alive_ratio_variance) as usize,
+                    Conclusion::Stable {
+                        alive_ratio_average,
+                    } => 100 - (60.0 * alive_ratio_average) as usize,
                     Conclusion::Crash => 0,
                 };
             }
