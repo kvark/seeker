@@ -183,11 +183,15 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
                 ),
             ];
             if let Some(conclusion) = experiment.conclusion {
+                let description = match conclusion {
+                    sim::Conclusion::Done(s) => format!(
+                        "avg={:.2} var={:.2}",
+                        s.alive_ratio_average, s.alive_ratio_variance
+                    ),
+                    other => format!("{:?}", other),
+                };
                 spans.push(Span::raw(" ("));
-                spans.push(Span::styled(
-                    format!("{:?}", conclusion),
-                    Style::default().fg(Color::Blue),
-                ));
+                spans.push(Span::styled(description, Style::default().fg(Color::Blue)));
                 spans.push(Span::raw(") - "));
                 spans.push(Span::styled(
                     format!("fit {}", experiment.fit),

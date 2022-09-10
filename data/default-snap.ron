@@ -25,8 +25,7 @@
 		},
 	),
 	limits: (
-		max_steps: 0x3000,
-		max_population_variance: 0.01,
+		max_steps: 0x1000,
 		update_weight: 0.01,
 	),
 )

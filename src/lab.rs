@@ -157,15 +157,10 @@ impl Laboratory {
                 .unwrap();
                 experiment.conclusion = Some(conclusion);
                 experiment.fit = match conclusion {
-                    Conclusion::Extinct => {
+                    Conclusion::Extinct | Conclusion::Saturate => {
                         mem::size_of::<usize>() * 8 - status.step.leading_zeros() as usize
                     }
-                    Conclusion::Indeterminate {
-                        alive_ratio_variance,
-                    } => 40 - (10.0 * alive_ratio_variance) as usize,
-                    Conclusion::Stable {
-                        alive_ratio_average,
-                    } => 100 - (60.0 * alive_ratio_average) as usize,
+                    Conclusion::Done(state) => 100 - (60.0 * state.alive_ratio_average) as usize,
                     Conclusion::Crash => 0,
                 };
             }
