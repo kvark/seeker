@@ -15,15 +15,11 @@ pub type Probability = f32;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Limits {
     pub max_steps: usize,
-    pub max_population_variance: f32,
     pub update_weight: f32,
 }
 
 impl Limits {
     fn are_valid(&self) -> bool {
-        if self.max_population_variance <= 0.0 {
-            return false;
-        }
         if self.update_weight < 0.0 || self.update_weight > 1.0 {
             return false;
         }
@@ -287,23 +283,31 @@ pub struct Snap {
     limits: Limits,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum Conclusion {
-    Extinct,
-    Indeterminate { alive_ratio_variance: f32 },
-    Stable { alive_ratio_average: f32 },
-    Crash,
-}
-
+#[derive(Copy, Clone, Debug)]
 pub struct State {
     pub step: usize,
     pub alive_ratio_average: f32,
     pub alive_ratio_variance: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum Conclusion {
+    Extinct,
+    Saturate,
+    Done(State),
+    Crash,
+}
+
 impl State {
     fn update(&mut self, alive_ratio: f32, limits: &Limits) -> Option<Conclusion> {
         self.step += 1;
+        if self.step > limits.max_steps {
+            return Some(Conclusion::Done(*self));
+        }
+        if alive_ratio == 0.0 {
+            return Some(Conclusion::Extinct);
+        }
+
         let offset = alive_ratio - self.alive_ratio_average;
         let offset_squared_rel = offset * offset / self.alive_ratio_average.max(0.01);
         self.alive_ratio_average = limits.update_weight * alive_ratio
@@ -311,16 +315,8 @@ impl State {
         self.alive_ratio_variance = limits.update_weight * offset_squared_rel
             + (1.0 - limits.update_weight) * self.alive_ratio_variance;
 
-        if self.step as f32 > 1.0 / limits.update_weight
-            && self.alive_ratio_variance < limits.max_population_variance
-        {
-            Some(Conclusion::Stable {
-                alive_ratio_average: self.alive_ratio_average,
-            })
-        } else if self.step > limits.max_steps {
-            Some(Conclusion::Indeterminate {
-                alive_ratio_variance: self.alive_ratio_variance,
-            })
+        if self.alive_ratio_average > 0.9 {
+            Some(Conclusion::Saturate)
         } else {
             None
         }
@@ -468,10 +464,6 @@ impl Simulation {
         }
 
         let analysis = grid.analyze();
-        if analysis.alive_ratio == 0.0 {
-            return Err(Conclusion::Extinct);
-        }
-
         if let Some(conclusion) = self.state.update(analysis.alive_ratio, &self.limits) {
             Err(conclusion)
         } else {
