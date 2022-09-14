@@ -1,13 +1,16 @@
 use seeker::{grid, lab, sim};
 
+const OCCUPANCY_HISTORY: usize = 50;
+
 #[derive(Default)]
-struct SimState {
+struct WidgetState {
     selection: Option<grid::Coordinates>,
+    occupancy_history: Vec<(&'static str, u64)>,
 }
 
 struct GridWidget<'a> {
     grid: &'a grid::Grid,
-    state: &'a SimState,
+    state: &'a WidgetState,
 }
 impl tui::widgets::Widget for GridWidget<'_> {
     fn render(self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
@@ -53,7 +56,7 @@ impl tui::widgets::Widget for GridWidget<'_> {
 
 fn draw_sim<B: tui::backend::Backend>(
     sim: &sim::Simulation,
-    state: &SimState,
+    widget_state: &WidgetState,
     frame: &mut tui::Frame<B>,
 ) {
     use tui::{
@@ -88,7 +91,13 @@ fn draw_sim<B: tui::backend::Backend>(
     let grid_block = w::Block::default().borders(w::Borders::ALL).title("Grid");
     let inner = grid_block.inner(top_rects[0]);
     frame.render_widget(grid_block, top_rects[0]);
-    frame.render_widget(GridWidget { grid, state }, inner);
+    frame.render_widget(
+        GridWidget {
+            grid,
+            state: widget_state,
+        },
+        inner,
+    );
 
     {
         let meta_rects = l::Layout::default()
@@ -96,8 +105,8 @@ fn draw_sim<B: tui::backend::Backend>(
             .constraints(
                 [
                     l::Constraint::Min(3),
+                    l::Constraint::Min(10),
                     l::Constraint::Min(5),
-                    l::Constraint::Min(4),
                 ]
                 .as_ref(),
             )
@@ -115,14 +124,7 @@ fn draw_sim<B: tui::backend::Backend>(
             let stat_block = w::Block::default().title("Stat").borders(w::Borders::ALL);
             let stat_rects = l::Layout::default()
                 .direction(l::Direction::Vertical)
-                .constraints(
-                    [
-                        l::Constraint::Length(1),
-                        l::Constraint::Length(1),
-                        l::Constraint::Length(1),
-                    ]
-                    .as_ref(),
-                )
+                .constraints([l::Constraint::Length(1), l::Constraint::Min(5)].as_ref())
                 .split(stat_block.inner(meta_rects[1]));
             frame.render_widget(stat_block, meta_rects[1]);
 
@@ -132,20 +134,33 @@ fn draw_sim<B: tui::backend::Backend>(
                     .wrap(w::Wrap { trim: false });
             frame.render_widget(para_step, stat_rects[0]);
 
-            let occupancy_average = w::Gauge::default()
-                .gauge_style(Style::default().fg(Color::DarkGray))
-                .percent((100.0 * state.alive_ratio_average) as u16)
-                .label("average");
-            frame.render_widget(occupancy_average, stat_rects[1]);
-
-            let occupancy_deviation = w::Gauge::default()
-                .gauge_style(Style::default().fg(Color::DarkGray))
-                .percent((100.0 * state.alive_ratio_variance.sqrt()) as u16)
-                .label("deviation");
-            frame.render_widget(occupancy_deviation, stat_rects[2]);
+            let max_occupancy = widget_state
+                .occupancy_history
+                .iter()
+                .map(|&(_, value)| value)
+                .max()
+                .unwrap_or_default();
+            let occupancy_title = format!("Occupancy (max {}%)", max_occupancy / 10);
+            let history_offset = widget_state
+                .occupancy_history
+                .len()
+                .checked_sub(stat_rects[1].width as usize)
+                .unwrap_or_default();
+            let occupancy = w::BarChart::default()
+                .block(
+                    w::Block::default()
+                        .borders(w::Borders::ALL)
+                        .title(occupancy_title),
+                )
+                .data(&widget_state.occupancy_history[history_offset..])
+                .bar_width(1)
+                .bar_gap(0)
+                .label_style(Style::default().fg(Color::Yellow))
+                .bar_style(Style::default().fg(Color::Green));
+            frame.render_widget(occupancy, stat_rects[1]);
         }
 
-        if let Some(coords) = state.selection {
+        if let Some(coords) = widget_state.selection {
             let x = coords.x - inner.x as grid::Coordinate;
             let y = coords.y - inner.y as grid::Coordinate;
             let mut text = vec![make_key_value("Coord = ", format!("{}x{}", x, y))];
@@ -228,7 +243,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
 enum Mode {
     Play {
         sim: sim::Simulation,
-        state: SimState,
+        state: WidgetState,
     },
     Find(lab::Laboratory),
 }
@@ -314,7 +329,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = match command.as_str() {
         PLAY_COMMAND => Mode::Play {
             sim: sim::Simulation::new(&init_snap).unwrap(),
-            state: SimState::default(),
+            state: WidgetState::default(),
         },
         FIND_COMMAND => {
             let mut config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -358,11 +373,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap();
                                 }
                             }
-                            ev::KeyCode::Char(' ') => {
-                                if let Err(conclusion) = sim.advance() {
+                            ev::KeyCode::Char(' ') => match sim.advance() {
+                                Ok(analysis) => {
+                                    if state.occupancy_history.len() >= OCCUPANCY_HISTORY {
+                                        state.occupancy_history.remove(0);
+                                    }
+                                    state
+                                        .occupancy_history
+                                        .push(("", (analysis.alive_ratio * 1000.0) as u64));
+                                }
+                                Err(conclusion) => {
                                     break ExitReason::Done(conclusion);
                                 }
-                            }
+                            },
                             _ => continue,
                         },
                         Ok(ev::Event::Mouse(ev::MouseEvent {
