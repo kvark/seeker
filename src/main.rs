@@ -128,10 +128,9 @@ fn draw_sim<B: tui::backend::Backend>(
                 .split(stat_block.inner(meta_rects[1]));
             frame.render_widget(stat_block, meta_rects[1]);
 
-            let state = sim.state();
-            let para_step =
-                w::Paragraph::new(vec![make_key_value("Step = ", format!("{}", state.step))])
-                    .wrap(w::Wrap { trim: false });
+            let step = sim.last_step();
+            let para_step = w::Paragraph::new(vec![make_key_value("Step = ", format!("{}", step))])
+                .wrap(w::Wrap { trim: false });
             frame.render_widget(para_step, stat_rects[0]);
 
             let max_occupancy = widget_state
@@ -197,14 +196,8 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
                     Style::default().fg(Color::DarkGray),
                 ),
             ];
-            if let Some(conclusion) = experiment.conclusion {
-                let description = match conclusion {
-                    sim::Conclusion::Done(s) => format!(
-                        "avg={:.2} var={:.2}",
-                        s.alive_ratio_average, s.alive_ratio_variance
-                    ),
-                    other => format!("{:?}", other),
-                };
+            if let Some(ref conclusion) = experiment.conclusion {
+                let description = format!("{}", conclusion);
                 spans.push(Span::raw(" ("));
                 spans.push(Span::styled(description, Style::default().fg(Color::Blue)));
                 spans.push(Span::raw(") - "));
@@ -240,6 +233,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
     frame.render_widget(experiment_list, top_rects[1]);
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Mode {
     Play {
         sim: sim::Simulation,
@@ -248,7 +242,6 @@ enum Mode {
     Find(lab::Laboratory),
 }
 
-#[derive(Debug)]
 enum ExitReason {
     Error,
     Quit,
@@ -363,7 +356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             ev::KeyCode::Char('s') => {
                                 let snap = sim.save_snap();
-                                let steps = sim.state().step;
+                                let steps = sim.last_step();
                                 if let Ok(file) = File::create(format!("step-{}.ron", steps)) {
                                     ron::ser::to_writer_pretty(
                                         file,
@@ -420,6 +413,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match event {
                         Err(_) => break ExitReason::Error,
                         Ok(ev::Event::Resize(..)) => {}
+                        #[allow(clippy::single_match)]
                         Ok(ev::Event::Key(event)) => match event.code {
                             ev::KeyCode::Esc => break ExitReason::Quit,
                             _ => {}
@@ -436,6 +430,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    println!("{:?}", reason);
+    if let ExitReason::Done(conclusion) = reason {
+        println!("{}", conclusion);
+    }
     Ok(())
 }
