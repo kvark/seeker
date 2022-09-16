@@ -111,7 +111,7 @@ impl Laboratory {
         });
 
         self.choir.spawn("advance").init(move |_| loop {
-            let step = sim.state().step + 1;
+            let step = sim.last_step() + 1;
             match sim.advance() {
                 Ok(_) if step % UPDATE_FREQUENCY == 0 => {
                     if sender
@@ -140,6 +140,13 @@ impl Laboratory {
 
     pub fn update(&mut self) {
         while let Ok(status) = self.receiver.try_recv() {
+            let max_fit = self
+                .experiments
+                .iter()
+                .map(|exp| exp.fit)
+                .max()
+                .unwrap_or_default();
+
             let mut experiment = self
                 .experiments
                 .iter_mut()
@@ -151,18 +158,32 @@ impl Laboratory {
             if let Some(conclusion) = status.conclusion {
                 writeln!(
                     self.log,
-                    "Conclude E[{}] with {:?} at step {}",
+                    "Conclude E[{}] as {} at step {}",
                     status.experiment_id, conclusion, status.step
                 )
                 .unwrap();
-                experiment.conclusion = Some(conclusion);
+
                 experiment.fit = match conclusion {
                     Conclusion::Extinct | Conclusion::Saturate => {
                         mem::size_of::<usize>() * 8 - status.step.leading_zeros() as usize
                     }
-                    Conclusion::Done(state) => 100 - (60.0 * state.alive_ratio_average) as usize,
+                    Conclusion::Done(state, ref snap) => {
+                        let fit = 100 - (60.0 * state.alive_ratio_average) as usize;
+                        if fit > max_fit {
+                            let name = format!("e{}-{}.ron", experiment.id, status.step);
+                            let file = fs::File::create(self.active_dir.join(name)).unwrap();
+                            ron::ser::to_writer_pretty(
+                                file,
+                                snap,
+                                ron::ser::PrettyConfig::default(),
+                            )
+                            .unwrap();
+                        }
+                        fit
+                    }
                     Conclusion::Crash => 0,
                 };
+                experiment.conclusion = Some(conclusion);
             }
         }
 
@@ -185,12 +206,12 @@ impl Laboratory {
                 let mut cutoff = self.rng.gen_range(0..fit_sum);
                 self.experiments
                     .iter()
-                    .find_map(move |ex| {
+                    .find(move |ex| {
                         if ex.fit > cutoff {
-                            Some(ex)
+                            true
                         } else {
                             cutoff -= ex.fit;
-                            None
+                            false
                         }
                     })
                     .unwrap()
@@ -212,8 +233,8 @@ impl Laboratory {
         let right = *value + self.config.probability_step;
         *value = if left < 0.0 {
             right
-        } else if right < 1.0 {
-            right
+        } else if right > 1.0 {
+            left
         } else {
             [left, right][self.rng.gen_range(0..2)]
         };
@@ -236,9 +257,9 @@ impl Laboratory {
                     .collect::<Vec<_>>();
                 let (byte_offset, ch) = candidates[self.rng.gen_range(0..candidates.len())];
                 let other = if ch == '0' {
-                    '1' as u8
+                    b'1'
                 } else if ch == '5' {
-                    '4' as u8
+                    b'4'
                 } else {
                     [ch as u8 - 1, ch as u8 + 1][self.rng.gen_range(0..2)]
                 };

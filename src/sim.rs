@@ -1,6 +1,6 @@
 use rand::{Rng as _, RngCore};
 use rustc_hash::FxHashMap;
-use std::num::NonZeroU32;
+use std::{fmt, num::NonZeroU32};
 
 use crate::grid::{Cell, Coordinate, Coordinates, Grid, GridAnalysis};
 
@@ -63,10 +63,10 @@ impl Rules {
             return false;
         }
         let sum = self.weight_sum() as usize;
-        if self.spawn.len() <= sum || !self.spawn.iter().all(|&prob| 0.0 <= prob && prob <= 1.0) {
+        if self.spawn.len() <= sum || !self.spawn.iter().all(|prob| (0.0..=1.0).contains(prob)) {
             return false;
         }
-        if self.keep.len() <= sum || !self.keep.iter().all(|&prob| 0.0 <= prob && prob <= 1.0) {
+        if self.keep.len() <= sum || !self.keep.iter().all(|prob| (0.0..=1.0).contains(prob)) {
             return false;
         }
         true
@@ -284,41 +284,54 @@ pub struct Snap {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct State {
-    pub step: usize,
+pub struct Statistics {
     pub alive_ratio_average: f32,
     pub alive_ratio_variance: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
 pub enum Conclusion {
     Extinct,
     Saturate,
-    Done(State),
+    Done(Statistics, Snap),
     Crash,
 }
 
-impl State {
-    fn update(&mut self, alive_ratio: f32, limits: &Limits) -> Option<Conclusion> {
-        self.step += 1;
-        if self.step > limits.max_steps {
-            return Some(Conclusion::Done(*self));
+impl fmt::Display for Conclusion {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Self::Extinct => "Extinct".fmt(formatter),
+            Self::Saturate => "Saturate".fmt(formatter),
+            Self::Done(ref stats, _) => write!(
+                formatter,
+                "Done(alive_avg={}, alive_var={})",
+                stats.alive_ratio_average, stats.alive_ratio_variance
+            ),
+            Self::Crash => "Crash".fmt(formatter),
         }
-        if alive_ratio == 0.0 {
-            return Some(Conclusion::Extinct);
+    }
+}
+
+impl Statistics {
+    fn update(
+        &mut self,
+        analysis: GridAnalysis,
+        limits: &Limits,
+    ) -> Result<GridAnalysis, Conclusion> {
+        if analysis.alive_ratio == 0.0 {
+            return Err(Conclusion::Extinct);
         }
 
-        let offset = alive_ratio - self.alive_ratio_average;
+        let offset = analysis.alive_ratio - self.alive_ratio_average;
         let offset_squared_rel = offset * offset / self.alive_ratio_average.max(0.01);
-        self.alive_ratio_average = limits.update_weight * alive_ratio
+        self.alive_ratio_average = limits.update_weight * analysis.alive_ratio
             + (1.0 - limits.update_weight) * self.alive_ratio_average;
         self.alive_ratio_variance = limits.update_weight * offset_squared_rel
             + (1.0 - limits.update_weight) * self.alive_ratio_variance;
 
         if self.alive_ratio_average > 0.9 {
-            Some(Conclusion::Saturate)
+            Err(Conclusion::Saturate)
         } else {
-            None
+            Ok(analysis)
         }
     }
 }
@@ -330,7 +343,8 @@ pub struct Simulation {
     limits: Limits,
     rng: rand::rngs::StdRng,
     random_seed: u64,
-    state: State,
+    step: usize,
+    stats: Statistics,
 }
 
 #[derive(Debug)]
@@ -364,8 +378,8 @@ impl Simulation {
             limits: snap.limits.clone(),
             rng,
             random_seed: snap.random_seed,
-            state: State {
-                step: 0,
+            step: 0,
+            stats: Statistics {
                 alive_ratio_average: match snap.data {
                     Data::Grid(_) => 0.0,
                     Data::Random { alive_ratio, .. } => alive_ratio,
@@ -384,8 +398,12 @@ impl Simulation {
         }
     }
 
-    pub fn state(&self) -> &State {
-        &self.state
+    pub fn stats(&self) -> &Statistics {
+        &self.stats
+    }
+
+    pub fn last_step(&self) -> usize {
+        self.step
     }
 
     pub fn random_seed(&self) -> u64 {
@@ -463,11 +481,13 @@ impl Simulation {
             }
         }
 
-        let analysis = grid.analyze();
-        if let Some(conclusion) = self.state.update(analysis.alive_ratio, &self.limits) {
-            Err(conclusion)
+        self.step += 1;
+        if self.step > self.limits.max_steps {
+            let snap = self.save_snap();
+            Err(Conclusion::Done(self.stats, snap))
         } else {
-            Ok(analysis)
+            let analysis = grid.analyze();
+            self.stats.update(analysis, &self.limits)
         }
     }
 }
