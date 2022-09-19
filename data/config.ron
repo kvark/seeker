@@ -1,5 +1,5 @@
 (
-    max_active: 10,
+    max_active: 5,
     max_in_flight: 20,
     size_power: (start:6, end:8),
     probability_step: 0.05,

@@ -185,6 +185,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
     let experiments = lab.experiments();
     let list_items = experiments
         .iter()
+        .rev()
         .map(|experiment| {
             let mut spans = vec![
                 Span::styled(
@@ -214,7 +215,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
         .block(
             w::Block::default()
                 .borders(w::Borders::ALL)
-                .title(format!("Experiments @{}", lab.iteration())),
+                .title("Experiments"),
         )
         .start_corner(l::Corner::TopLeft);
 

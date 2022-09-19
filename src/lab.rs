@@ -72,10 +72,6 @@ impl Laboratory {
         }
     }
 
-    pub fn iteration(&self) -> usize {
-        self.next_id
-    }
-
     pub fn experiments(&self) -> &[Experiment] {
         &self.experiments
     }
@@ -187,36 +183,37 @@ impl Laboratory {
             }
         }
 
-        self.experiments
-            .sort_by_key(|experiment| -(experiment.fit as isize));
-        let retain_cutoff = self
-            .experiments
-            .get(self.config.max_active)
-            .map_or(0, |ex| ex.fit);
-        let best_id = self.experiments[0].id;
-        //TODO: different policies of the experiments generation
-        // e.g. randomly choose (or resample) using `fit` as the weight
-        self.experiments
-            .retain(|ex| ex.conclusion.is_none() || ex.fit > retain_cutoff || ex.id == best_id);
+        let mut total_fit = 0;
+        let mut current_active = 0;
+        for ex in self.experiments.iter() {
+            if ex.conclusion.is_some() {
+                total_fit += ex.fit
+            } else {
+                current_active += 1;
+            }
+        }
 
-        if self.experiments.len() < self.config.max_in_flight {
-            let fit_sum = self.experiments.iter().map(|ex| ex.fit).sum::<usize>();
-
-            let parent = if fit_sum > 0 {
-                let mut cutoff = self.rng.gen_range(0..fit_sum);
+        if current_active < self.config.max_active {
+            let parent = if total_fit != 0 {
+                let mut cutoff = self.rng.gen_range(0..total_fit);
                 self.experiments
-                    .iter()
-                    .find(move |ex| {
-                        if ex.fit > cutoff {
-                            true
+                    .iter_mut()
+                    .find(|ex| {
+                        if ex.conclusion.is_some() {
+                            if cutoff < ex.fit {
+                                true
+                            } else {
+                                cutoff -= ex.fit;
+                                false
+                            }
                         } else {
-                            cutoff -= ex.fit;
                             false
                         }
                     })
                     .unwrap()
             } else {
-                self.experiments.first().unwrap()
+                let index = self.rng.gen_range(0..self.experiments.len());
+                &mut self.experiments[index]
             };
 
             let mut snap = parent.snap.clone();
