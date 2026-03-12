@@ -20,10 +20,10 @@ crossbeam-channel = "0.5"
 crossterm = "0.28"
 log = "0.4"
 rand = "0.8"
-ron = "0.7"
+ron = "0.8"
 rustc-hash = "1"
 serde = { version = "1", features = ["serde_derive"]}
 ratatui = { version = "0.29", features = ["crossterm"] }
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.5"
