@@ -12,9 +12,9 @@ struct GridWidget<'a> {
     grid: &'a grid::Grid,
     state: &'a WidgetState,
 }
-impl tui::widgets::Widget for GridWidget<'_> {
-    fn render(self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
-        use tui::style::Color;
+impl ratatui::widgets::Widget for GridWidget<'_> {
+    fn render(self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::style::Color;
 
         for y in 0..area.height {
             for x in 0..area.width {
@@ -28,9 +28,9 @@ impl tui::widgets::Widget for GridWidget<'_> {
                     } else {
                         Color::Blue
                     };
-                    ("█", color)
+                    ('█', color)
                 } else {
-                    (" ", Color::Reset)
+                    (' ', Color::Reset)
                 };
                 let background = if self.state.selection
                     == Some(grid::Coordinates {
@@ -42,32 +42,28 @@ impl tui::widgets::Widget for GridWidget<'_> {
                     Color::Reset
                 };
 
-                let cell_index = (y + area.y) * buf.area.width + x + area.x;
-                buf.content[cell_index as usize] = tui::buffer::Cell {
-                    symbol: symbol.to_string(), // what a waste!
-                    fg: color,
-                    bg: background,
-                    ..Default::default()
-                };
+                if let Some(buf_cell) = buf.cell_mut((area.x + x, area.y + y)) {
+                    buf_cell.set_char(symbol).set_fg(color).set_bg(background);
+                }
             }
         }
     }
 }
 
-fn draw_sim<B: tui::backend::Backend>(
+fn draw_sim(
     sim: &sim::Simulation,
     widget_state: &WidgetState,
-    frame: &mut tui::Frame<B>,
+    frame: &mut ratatui::Frame,
 ) {
-    use tui::{
+    use ratatui::{
         layout as l,
         style::{Color, Style},
-        text::{Span, Spans},
+        text::{Line, Span},
         widgets as w,
     };
 
-    fn make_key_value(key: &str, value: String) -> Spans {
-        Spans(vec![
+    fn make_key_value<'a>(key: &'a str, value: String) -> Line<'a> {
+        Line::from(vec![
             Span::styled(key, Style::default().fg(Color::DarkGray)),
             Span::raw(value),
         ])
@@ -86,7 +82,7 @@ fn draw_sim<B: tui::backend::Backend>(
             .as_ref(),
         )
         .margin(1)
-        .split(frame.size());
+        .split(frame.area());
 
     let grid_block = w::Block::default().borders(w::Borders::ALL).title("Grid");
     let inner = grid_block.inner(top_rects[0]);
@@ -174,11 +170,11 @@ fn draw_sim<B: tui::backend::Backend>(
     }
 }
 
-fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Frame<B>) {
-    use tui::{
+fn draw_lab(lab: &lab::Laboratory, frame: &mut ratatui::Frame) {
+    use ratatui::{
         layout as l,
         style::{Color, Style},
-        text::{Span, Spans},
+        text::{Line, Span},
         widgets as w,
     };
 
@@ -207,7 +203,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
                     Style::default().fg(Color::Yellow),
                 ));
             }
-            w::ListItem::new(vec![Spans(spans)])
+            w::ListItem::new(vec![Line::from(spans)])
         })
         .collect::<Vec<_>>();
 
@@ -217,7 +213,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
                 .borders(w::Borders::ALL)
                 .title("Experiments"),
         )
-        .start_corner(l::Corner::TopLeft);
+        .direction(w::ListDirection::TopToBottom);
 
     let top_rects = l::Layout::default()
         .direction(l::Direction::Vertical)
@@ -229,7 +225,7 @@ fn draw_lab<B: tui::backend::Backend>(lab: &lab::Laboratory, frame: &mut tui::Fr
             .as_ref(),
         )
         .margin(1)
-        .split(frame.size());
+        .split(frame.area());
 
     frame.render_widget(experiment_list, top_rects[1]);
 }
@@ -250,7 +246,7 @@ enum ExitReason {
 }
 
 struct Output {
-    terminal: tui::Terminal<tui::backend::CrosstermBackend<std::io::Stdout>>,
+    terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 }
 
 impl Output {
@@ -262,8 +258,8 @@ impl Output {
         stdout.execute(crossterm::event::EnableMouseCapture)?;
         crossterm::terminal::enable_raw_mode()?;
 
-        let backend = tui::backend::CrosstermBackend::new(stdout);
-        let mut terminal = tui::Terminal::new(backend)?;
+        let backend = ratatui::backend::CrosstermBackend::new(stdout);
+        let mut terminal = ratatui::Terminal::new(backend)?;
         terminal.hide_cursor()?;
         Ok(Self { terminal })
     }
@@ -394,7 +390,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                             state.selection = if state.selection == new { None } else { new };
                         }
-                        Ok(ev::Event::Mouse(..)) => {
+                        Ok(ev::Event::Mouse(..))
+                        | Ok(ev::Event::FocusGained)
+                        | Ok(ev::Event::FocusLost)
+                        | Ok(ev::Event::Paste(_)) => {
                             continue;
                         }
                     }
@@ -419,7 +418,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ev::KeyCode::Esc => break ExitReason::Quit,
                             _ => {}
                         },
-                        Ok(ev::Event::Mouse(..)) => {
+                        Ok(ev::Event::Mouse(..))
+                        | Ok(ev::Event::FocusGained)
+                        | Ok(ev::Event::FocusLost)
+                        | Ok(ev::Event::Paste(_)) => {
                             continue;
                         }
                     }
