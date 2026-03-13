@@ -150,7 +150,7 @@ impl Laboratory {
                 .max()
                 .unwrap_or_default();
 
-            let mut experiment = self
+            let experiment = self
                 .experiments
                 .iter_mut()
                 .find(|exp| exp.id == status.experiment_id)
