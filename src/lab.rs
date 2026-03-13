@@ -9,6 +9,7 @@ const CHANNEL_BOUND: usize = 200;
 pub struct Configuration {
     max_active: usize,
     max_in_flight: usize,
+    max_archive: usize,
     size_power: Range<usize>,
     probability_step: Probability,
     max_probability_weight: Weight,
@@ -181,6 +182,38 @@ impl Laboratory {
                 };
                 experiment.conclusion = Some(conclusion);
             }
+        }
+
+        // Prune concluded experiments to keep only the best `max_archive`.
+        // Active (in-flight) experiments are always retained.
+        let concluded_count = self
+            .experiments
+            .iter()
+            .filter(|ex| ex.conclusion.is_some())
+            .count();
+        if concluded_count > self.config.max_archive {
+            // Find the fitness threshold: sort concluded fitnesses descending,
+            // keep the top max_archive.
+            let mut concluded_fits: Vec<usize> = self
+                .experiments
+                .iter()
+                .filter(|ex| ex.conclusion.is_some())
+                .map(|ex| ex.fit)
+                .collect();
+            concluded_fits.sort_unstable_by(|a, b| b.cmp(a));
+            let min_fit = concluded_fits[self.config.max_archive - 1];
+            let mut kept = 0;
+            self.experiments.retain(|ex| {
+                if ex.conclusion.is_none() {
+                    return true; // always keep active
+                }
+                if ex.fit >= min_fit && kept < self.config.max_archive {
+                    kept += 1;
+                    true
+                } else {
+                    false
+                }
+            });
         }
 
         let mut total_fit = 0;

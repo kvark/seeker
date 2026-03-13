@@ -1,6 +1,7 @@
 (
     max_active: 5,
     max_in_flight: 20,
+    max_archive: 50,
     size_power: (start:6, end:8),
     probability_step: 0.05,
     max_probability_weight: 8,
