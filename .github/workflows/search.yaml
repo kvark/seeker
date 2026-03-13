@@ -64,6 +64,7 @@ jobs:
 
     - name: Run search
       run: |
+        mkdir -p data/active
         cargo run --release -- headless data/default-snap.ron ${{ inputs.duration }} \
           > data/active/summary.md
         cat data/active/summary.md >> "$GITHUB_STEP_SUMMARY"
