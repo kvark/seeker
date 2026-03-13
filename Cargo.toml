@@ -24,6 +24,7 @@ ron = "0.8"
 rustc-hash = "1"
 serde = { version = "1", features = ["serde_derive"]}
 ratatui = { version = "0.29", features = ["crossterm"] }
+gif = "0.13"
 
 [dev-dependencies]
 criterion = "0.5"

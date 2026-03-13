@@ -23,6 +23,12 @@ pub struct Experiment {
     pub fit: usize,
 }
 
+impl Experiment {
+    pub fn snap(&self) -> &Snap {
+        &self.snap
+    }
+}
+
 struct TaskStatus {
     experiment_id: usize,
     step: usize,
