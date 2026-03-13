@@ -1,3 +1,4 @@
 pub mod grid;
 pub mod lab;
+pub mod render;
 pub mod sim;

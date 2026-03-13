@@ -1,0 +1,82 @@
+name: search
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Search duration in seconds'
+        required: true
+        default: '300'
+        type: string
+      max_active:
+        description: 'Max concurrent experiments'
+        required: false
+        default: '5'
+        type: string
+      max_archive:
+        description: 'Max archived experiments'
+        required: false
+        default: '50'
+        type: string
+      size_power_start:
+        description: 'Min grid size power (2^n)'
+        required: false
+        default: '6'
+        type: string
+      size_power_end:
+        description: 'Max grid size power (2^n)'
+        required: false
+        default: '8'
+        type: string
+      probability_step:
+        description: 'Mutation step for probabilities'
+        required: false
+        default: '0.05'
+        type: string
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Build (release)
+      run: cargo build --release
+
+    - name: Write config
+      run: |
+        cat > data/config.ron << 'CONF'
+        (
+            max_active: ${{ inputs.max_active }},
+            max_in_flight: 20,
+            max_archive: ${{ inputs.max_archive }},
+            size_power: (start:${{ inputs.size_power_start }}, end:${{ inputs.size_power_end }}),
+            probability_step: ${{ inputs.probability_step }},
+            max_probability_weight: 8,
+        )
+        CONF
+        echo "Config:"
+        cat data/config.ron
+
+    - name: Run search
+      run: |
+        cargo run --release -- headless data/default-snap.ron ${{ inputs.duration }} \
+          > data/active/summary.md
+        cat data/active/summary.md >> "$GITHUB_STEP_SUMMARY"
+        echo "---"
+        cat data/active/summary.md
+
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: search-results
+        path: |
+          data/active/summary.md
+          data/active/find.log
+          data/active/gifs/
+          data/active/e*-*.ron
+        retention-days: 90
