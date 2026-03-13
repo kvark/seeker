@@ -296,6 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const MY_NAME: &str = "seeker";
     const PLAY_COMMAND: &str = "play";
     const FIND_COMMAND: &str = "find";
+    const HEADLESS_COMMAND: &str = "headless";
 
     let mut args = std::env::args();
     let _exec_name = args.next().unwrap();
@@ -305,6 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Usage:");
             println!("{} {} [<path_to_snap>]", MY_NAME, PLAY_COMMAND);
             println!("{} {} <path_to_init_snap>", MY_NAME, FIND_COMMAND);
+            println!("{} {} <path_to_init_snap>", MY_NAME, HEADLESS_COMMAND);
             return Ok(());
         }
     };
@@ -329,6 +331,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut lab = lab::Laboratory::new(config, "data/active/");
             lab.add_experiment(init_snap, 0);
             Mode::Find(lab)
+        }
+        HEADLESS_COMMAND => {
+            let mut config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            config_path.push("data");
+            config_path.push("config.ron");
+            let config = ron::de::from_reader(File::open(config_path).unwrap()).unwrap();
+            let mut lab = lab::Laboratory::new(config, "data/active/");
+            lab.add_experiment(init_snap, 0);
+            println!("Running headless search...");
+            loop {
+                lab.update();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let experiments = lab.experiments();
+                let concluded = experiments.iter().filter(|e| e.conclusion.is_some()).count();
+                let active = experiments.len() - concluded;
+                let max_fit = experiments.iter().map(|e| e.fit).max().unwrap_or(0);
+                let total = experiments.len();
+                print!(
+                    "\r[{} total, {} active, {} concluded] best fit: {}    ",
+                    total, active, concluded, max_fit
+                );
+                use std::io::Write as _;
+                std::io::stdout().flush().ok();
+            }
         }
         _ => {
             println!("Unknown command: '{}'", command);
