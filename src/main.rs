@@ -1,4 +1,4 @@
-use seeker::{grid, lab, render, sim};
+use seeker::{analysis, grid, lab, render, sim};
 
 const OCCUPANCY_HISTORY: usize = 50;
 
@@ -305,7 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{} {} [<path_to_snap>]", MY_NAME, PLAY_COMMAND);
         println!("{} {} [<path_to_init_snap>]", MY_NAME, FIND_COMMAND);
         println!(
-            "{} {} [<path_to_init_snap>] [<duration_secs>]",
+            "{} {} [<path_to_init_snap>] [<duration_secs>] [<config_path>]",
             MY_NAME, HEADLESS_COMMAND
         );
         println!("{} {} <path_to_snap> <output.gif>", MY_NAME, REPLAY_COMMAND);
@@ -342,9 +342,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .get(3)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(120);
+            let config_name = args
+                .get(4)
+                .cloned()
+                .unwrap_or_else(|| "data/config.ron".to_string());
             let mut config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            config_path.push("data");
-            config_path.push("config.ron");
+            config_path.push(&config_name);
             let config = ron::de::from_reader(File::open(config_path).unwrap()).unwrap();
             let mut lab = lab::Laboratory::new(config, "data/active/");
             lab.add_experiment(init_snap, 0);
@@ -353,7 +356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let deadline = std::time::Duration::from_secs(duration_secs);
             while start.elapsed() < deadline {
                 lab.update();
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(10));
                 let experiments = lab.experiments();
                 let concluded = experiments.iter().filter(|e| e.conclusion.is_some()).count();
                 let active = experiments.len() - concluded;
@@ -406,17 +409,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !survivors.is_empty() {
                 println!("### Top Survivors");
                 println!();
-                println!("| ID | Fitness | Alive Avg | Alive Var | Snap |");
-                println!("|----|---------|-----------|-----------|------|");
+                println!("| ID | Fitness | Alive Avg | Alive Var | Period | Steps | Snap |");
+                println!("|----|---------|-----------|-----------|--------|-------|------|");
                 let top_n = survivors.len().min(10);
                 for exp in &survivors[..top_n] {
                     if let Some(sim::Conclusion::Done(stats, _)) = &exp.conclusion {
                         let snap_file = format!("e{}-{}.ron", exp.id, exp.steps);
                         println!(
-                            "| {} | {} | {:.4} | {:.6} | {} |",
+                            "| {} | {} | {:.4} | {:.6} | {} | {} | {} |",
                             exp.id, exp.fit, stats.alive_ratio_average,
-                            stats.alive_ratio_variance, snap_file
+                            stats.alive_ratio_variance, stats.period,
+                            exp.steps, snap_file
                         );
+                    }
+                }
+                println!();
+
+                // Pattern analysis for top survivors
+                println!("### Pattern Analysis");
+                println!();
+                let analyze_count = top_n.min(10);
+                for exp in &survivors[..analyze_count] {
+                    if let Some(sim::Conclusion::Done(..)) = &exp.conclusion {
+                        // Re-run simulation to get the stabilized grid
+                        if let Ok(mut sim) = sim::Simulation::new(exp.snap()) {
+                            loop {
+                                match sim.advance() {
+                                    Ok(_) => {}
+                                    Err(_) => break,
+                                }
+                            }
+                            let (_patterns, summary) = analysis::analyze_grid(sim.grid());
+                            print!("- E[{}]: {}", exp.id, summary);
+                            // Highlight interesting finds
+                            if !summary.spaceships.is_empty() {
+                                print!(" **SPACESHIP FOUND!**");
+                            }
+                            let high_period: Vec<_> = summary
+                                .oscillators
+                                .iter()
+                                .filter(|&&p| p > 2)
+                                .collect();
+                            if !high_period.is_empty() {
+                                print!(
+                                    " **HIGH-PERIOD OSC: {:?}**",
+                                    high_period
+                                );
+                            }
+                            println!();
+                        }
                     }
                 }
                 println!();

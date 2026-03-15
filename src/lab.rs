@@ -1,3 +1,4 @@
+use crate::analysis;
 use crate::sim::{Conclusion, Data, Probability, ProbabilityTable, Simulation, Snap, Weight};
 use rand::{rngs::ThreadRng, Rng as _};
 use std::{fs, io::Write as _, mem, ops::Range, path, sync::Arc};
@@ -13,6 +14,9 @@ pub struct Configuration {
     size_power: Range<usize>,
     probability_step: Probability,
     max_probability_weight: Weight,
+    /// When true, rules are locked and only initial conditions are mutated.
+    #[serde(default)]
+    pub frozen_rules: bool,
 }
 
 pub struct Experiment {
@@ -62,8 +66,11 @@ impl Laboratory {
         writeln!(log, "Seeker {}", env!("CARGO_PKG_VERSION")).unwrap();
 
         let choir = choir::Choir::new();
-        let w1 = choir.add_worker("w1");
-        let w2 = choir.add_worker("w2");
+        let num_workers = config.max_active.max(2);
+        let mut workers = Vec::with_capacity(num_workers);
+        for i in 0..num_workers {
+            workers.push(choir.add_worker(&format!("w{}", i)));
+        }
         let (sender_origin, receiver) = crossbeam_channel::bounded(CHANNEL_BOUND);
         Self {
             config,
@@ -71,7 +78,7 @@ impl Laboratory {
             sender_origin,
             receiver,
             choir,
-            _workers: vec![w1, w2],
+            _workers: workers,
             experiments: Vec::new(),
             next_id: 0,
             active_dir,
@@ -170,8 +177,38 @@ impl Laboratory {
                     Conclusion::Extinct | Conclusion::Saturate => {
                         mem::size_of::<usize>() * 8 - status.step.leading_zeros() as usize
                     }
-                    Conclusion::Done(state, ref snap) => {
-                        let fit = 100 - (60.0 * state.alive_ratio_average) as usize;
+                    Conclusion::Done(ref state, ref snap) => {
+                        let fit = if self.config.frozen_rules {
+                            // GoL fitness: analyze final grid patterns directly
+                            let mut dummy_rng =
+                                <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0);
+                            let analysis_score =
+                                if let Ok(grid) = snap.data.parse(&mut dummy_rng) {
+                                    let (_, summary) = analysis::analyze_grid(&grid);
+                                    let mut score = 0usize;
+                                    // Reward unique pattern diversity
+                                    score += summary.unique_patterns.min(20) * 2;
+                                    // Big reward for spaceships (gliders!)
+                                    score += summary.spaceships.len() * 30;
+                                    // Reward higher-period oscillators
+                                    for &p in &summary.oscillators {
+                                        score += if p > 2 { p.min(20) } else { 1 };
+                                    }
+                                    score
+                                } else {
+                                    0
+                                };
+
+                            let base = 20usize;
+                            let var_score =
+                                (state.alive_ratio_variance * 2000.0).min(20.0) as usize;
+                            // Late stabilization = interesting transients
+                            let late_score =
+                                (state.stabilized_step as f32 / 100.0).min(20.0) as usize;
+                            base + var_score + late_score + analysis_score
+                        } else {
+                            100 - (60.0 * state.alive_ratio_average) as usize
+                        };
                         if fit > max_fit {
                             let name = format!("e{}-{}.ron", experiment.id, status.step);
                             let file = fs::File::create(self.active_dir.join(name)).unwrap();
@@ -277,6 +314,10 @@ impl Laboratory {
     }
 
     fn mutate_snap(&mut self, snap: &mut Snap) {
+        if self.config.frozen_rules {
+            self.mutate_snap_frozen(snap);
+            return;
+        }
         match self.rng.gen_range(0..4) {
             0 => {
                 self.mutate_probabilities(&mut snap.rules.spawn);
@@ -318,6 +359,107 @@ impl Laboratory {
                     Data::Grid(_) => {
                         log::error!("Unable to change grid size");
                     }
+                }
+            }
+        }
+    }
+
+    /// Mutation for frozen_rules mode: only mutate initial conditions.
+    /// Uses "soup in a box" approach — small dense random patch in a larger grid.
+    fn mutate_snap_frozen(&mut self, snap: &mut Snap) {
+        match self.rng.gen_range(0..10) {
+            0..=5 => {
+                // 60%: create a new random soup (small patch in larger grid)
+                self.create_soup(snap);
+            }
+            6..=8 => {
+                // 30%: flip random cells in existing grid (exploitation)
+                let count = self.rng.gen_range(1..=5);
+                self.materialize_and_flip(snap, count);
+            }
+            _ => {
+                // 10%: create soup with different parameters
+                self.create_soup(snap);
+            }
+        }
+    }
+
+    /// Create a small random "soup" (dense patch) centered in a larger grid.
+    /// This gives gliders and other spaceships room to travel before wrapping.
+    fn create_soup(&mut self, snap: &mut Snap) {
+        use crate::grid::{Coordinates, Grid};
+
+        let grid_power = self.rng.gen_range(self.config.size_power.clone());
+        let grid_size = 1i32 << grid_power;
+        // Soup size: 8-20 cells on a side
+        let soup_size = self.rng.gen_range(8..=20);
+        let density: f32 = self.rng.gen_range(0.3..0.5);
+
+        let mut grid = Grid::new(Coordinates {
+            x: grid_size,
+            y: grid_size,
+        });
+
+        let offset = (grid_size - soup_size) / 2;
+        let cell_count = (soup_size as f32 * soup_size as f32 * density) as usize;
+        for _ in 0..cell_count {
+            let x = offset + self.rng.gen_range(0..soup_size);
+            let y = offset + self.rng.gen_range(0..soup_size);
+            grid.init(x, y);
+        }
+
+        snap.data = Data::unparse(&grid);
+        snap.random_seed = self.rng.gen();
+    }
+
+    /// Convert Data::Random to Data::Grid (materializing the actual cells),
+    /// then flip `count` random cells.
+    fn materialize_and_flip(&mut self, snap: &mut Snap, count: usize) {
+        // Materialize Random → Grid if needed
+        if let Data::Random { .. } = &snap.data {
+            let mut sim_rng =
+                <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(snap.random_seed);
+            if let Ok(grid) = snap.data.parse(&mut sim_rng) {
+                snap.data = Data::unparse(&grid);
+            } else {
+                snap.random_seed = self.rng.gen();
+                return;
+            }
+        }
+
+        // Flip random cells in the hex-encoded grid
+        if let Data::Grid(ref mut lines) = snap.data {
+            let height = lines.len();
+            if height == 0 {
+                return;
+            }
+            let chars_per_line = lines[0].len();
+            if chars_per_line == 0 {
+                return;
+            }
+            let width = chars_per_line * 4;
+
+            for _ in 0..count {
+                let x = self.rng.gen_range(0..width);
+                let y = self.rng.gen_range(0..height);
+                let char_idx = x / 4;
+                let bit_idx = (x % 4) as u32;
+                let ch = lines[y].as_bytes()[char_idx];
+                let val = match ch {
+                    b'0'..=b'9' => ch - b'0',
+                    b'a'..=b'f' => 10 + ch - b'a',
+                    b'A'..=b'F' => 10 + ch - b'A',
+                    _ => continue,
+                };
+                let new_val = val ^ (1 << bit_idx);
+                let new_ch = if new_val < 10 {
+                    b'0' + new_val
+                } else {
+                    b'a' + new_val - 10
+                };
+                // Safety: we're replacing one ASCII byte with another ASCII byte
+                unsafe {
+                    lines[y].as_bytes_mut()[char_idx] = new_ch;
                 }
             }
         }

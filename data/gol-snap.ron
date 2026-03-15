@@ -1,0 +1,26 @@
+(
+	data: Random(
+		width: 128,
+		height: 128,
+		alive_ratio: 0.01,
+	),
+	random_seed: 42,
+	rules: (
+		kernel: [
+			"111",
+			"1X1",
+			"111",
+		],
+		spawn: {
+			3: 1.0,
+		},
+		keep: {
+			2: 1.0,
+			3: 1.0,
+		},
+	),
+	limits: (
+		max_steps: 5000,
+		update_weight: 0.01,
+	),
+)

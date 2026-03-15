@@ -90,7 +90,7 @@ pub enum DataParseError {
 }
 
 impl Data {
-    fn parse(&self, rng: &mut impl RngCore) -> Result<Grid, DataParseError> {
+    pub fn parse(&self, rng: &mut impl RngCore) -> Result<Grid, DataParseError> {
         match *self {
             Self::Random {
                 width,
@@ -134,7 +134,7 @@ impl Data {
         }
     }
 
-    fn unparse(grid: &Grid) -> Self {
+    pub fn unparse(grid: &Grid) -> Self {
         let size = grid.size();
         assert_eq!(size.x % 4, 0);
         let mut lines = Vec::with_capacity(size.y as usize);
@@ -279,7 +279,7 @@ impl HumanRules {
 pub struct Snap {
     pub data: Data,
     pub rules: HumanRules,
-    random_seed: u64,
+    pub random_seed: u64,
     limits: Limits,
 }
 
@@ -287,6 +287,10 @@ pub struct Snap {
 pub struct Statistics {
     pub alive_ratio_average: f32,
     pub alive_ratio_variance: f32,
+    /// Detected period of the grid state (0 = not yet detected).
+    pub period: usize,
+    /// Step at which periodicity was first detected.
+    pub stabilized_step: usize,
 }
 
 pub enum Conclusion {
@@ -345,6 +349,10 @@ pub struct Simulation {
     random_seed: u64,
     step: usize,
     stats: Statistics,
+    /// Map of grid hash → step when first seen, for period detection.
+    hash_seen: FxHashMap<u64, usize>,
+    /// Candidate period awaiting verification: (period, expected_hash, verify_at_step).
+    candidate_period: Option<(usize, u64, usize)>,
 }
 
 #[derive(Debug)]
@@ -385,7 +393,11 @@ impl Simulation {
                     Data::Random { alive_ratio, .. } => alive_ratio,
                 },
                 alive_ratio_variance: 0.0,
+                period: 0,
+                stabilized_step: 0,
             },
+            hash_seen: FxHashMap::default(),
+            candidate_period: None,
         })
     }
 
@@ -482,6 +494,44 @@ impl Simulation {
         }
 
         self.step += 1;
+
+        // Period detection via grid hashing with verification
+        if self.stats.period == 0 {
+            let hash = grid.hash_state();
+            if let Some((period, expected_hash, verify_at)) = self.candidate_period {
+                // We have a candidate — verify it
+                if self.step >= verify_at {
+                    if hash == expected_hash {
+                        // Confirmed! Grid truly has this period.
+                        self.stats.period = period;
+                        self.stats.stabilized_step = self.step;
+                        self.candidate_period = None;
+                        // Free memory — no longer needed
+                        self.hash_seen = FxHashMap::default();
+                    } else {
+                        // False positive — keep searching
+                        self.candidate_period = None;
+                    }
+                }
+            } else if let Some(&first_step) = self.hash_seen.get(&hash) {
+                // Candidate period found — schedule verification one period later
+                let period = self.step - first_step;
+                if period > 0 {
+                    self.candidate_period = Some((period, hash, self.step + period));
+                }
+            } else {
+                self.hash_seen.insert(hash, self.step);
+            }
+        } else {
+            // Already confirmed period — run a few more cycles for stable stats, then conclude
+            let extra = self.step - self.stats.stabilized_step;
+            let needed = (self.stats.period * 10).max(200);
+            if extra >= needed {
+                let snap = self.save_snap();
+                return Err(Conclusion::Done(self.stats, snap));
+            }
+        }
+
         if self.step > self.limits.max_steps {
             let snap = self.save_snap();
             Err(Conclusion::Done(self.stats, snap))
