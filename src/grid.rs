@@ -1,3 +1,4 @@
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU32;
 
 pub type Coordinate = i32;
@@ -63,5 +64,21 @@ impl Grid {
         GridAnalysis {
             alive_ratio: alive as f32 / (self.size.x * self.size.y) as f32,
         }
+    }
+
+    /// Hash the alive/dead state of the grid for periodicity detection.
+    pub fn hash_state(&self) -> u64 {
+        let mut hasher = rustc_hash::FxHasher::default();
+        for (i, cell) in self.cells.iter().enumerate() {
+            if cell.is_some() {
+                i.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// Total number of alive cells.
+    pub fn alive_count(&self) -> usize {
+        self.cells.iter().filter(|c| c.is_some()).count()
     }
 }
