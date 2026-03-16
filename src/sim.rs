@@ -298,6 +298,10 @@ pub struct Snap {
 pub struct Statistics {
     pub alive_ratio_average: f32,
     pub alive_ratio_variance: f32,
+    /// Exponentially weighted average of the birth rate (fraction of cells born per step).
+    pub birth_rate_average: f32,
+    /// Exponentially weighted variance of the birth rate.
+    pub birth_rate_variance: f32,
     /// Detected period of the grid state (0 = not yet detected).
     pub period: usize,
     /// Step at which periodicity was first detected.
@@ -342,6 +346,14 @@ impl Statistics {
             + (1.0 - limits.update_weight) * self.alive_ratio_average;
         self.alive_ratio_variance = limits.update_weight * offset_squared_rel
             + (1.0 - limits.update_weight) * self.alive_ratio_variance;
+
+        // Update birth rate stats
+        let br_offset = analysis.birth_rate - self.birth_rate_average;
+        let br_offset_sq = br_offset * br_offset / self.birth_rate_average.max(0.001);
+        self.birth_rate_average = limits.update_weight * analysis.birth_rate
+            + (1.0 - limits.update_weight) * self.birth_rate_average;
+        self.birth_rate_variance = limits.update_weight * br_offset_sq
+            + (1.0 - limits.update_weight) * self.birth_rate_variance;
 
         if self.alive_ratio_average > 0.9 {
             Err(Conclusion::Saturate)
@@ -404,6 +416,8 @@ impl Simulation {
                     Data::Random { alive_ratio, .. } => alive_ratio,
                 },
                 alive_ratio_variance: 0.0,
+                birth_rate_average: 0.0,
+                birth_rate_variance: 0.0,
                 period: 0,
                 stabilized_step: 0,
             },
@@ -456,6 +470,7 @@ impl Simulation {
         };
         let size = grid.size();
 
+        let mut births = 0usize;
         for y in 0..size.y {
             for x in 0..size.x {
                 let score = self
@@ -473,6 +488,7 @@ impl Simulation {
 
                 *grid.mutate(x, y) = match prev.get(x, y) {
                     None if coin < self.rules.spawn[score as usize] => {
+                        births += 1;
                         let mut avg_breed_age = 0.0;
                         let mut avg_velocity = [0.0; 2];
                         for (offsets, &weight) in self.rules.kernel.iter() {
@@ -548,7 +564,7 @@ impl Simulation {
             let snap = self.save_snap();
             Err(Conclusion::Done(self.stats, snap))
         } else {
-            let analysis = grid.analyze();
+            let analysis = grid.analyze_with_births(births);
             self.stats.update(analysis, &self.limits)
         }
     }

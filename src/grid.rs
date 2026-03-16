@@ -33,6 +33,8 @@ pub struct Grid {
 
 pub struct GridAnalysis {
     pub alive_ratio: f32,
+    /// Fraction of cells that were born (dead → alive) this step.
+    pub birth_rate: f32,
 }
 
 const NULL_CELL: Option<Cell> = None;
@@ -90,9 +92,16 @@ impl Grid {
     }
 
     pub fn analyze(&self) -> GridAnalysis {
+        self.analyze_with_births(0)
+    }
+
+    /// Analyze the grid, including a birth count from the simulation step.
+    pub fn analyze_with_births(&self, births: usize) -> GridAnalysis {
         let alive: usize = self.cells.iter().filter(|cell| cell.is_some()).count();
+        let total = (self.size.x * self.size.y) as f32;
         GridAnalysis {
-            alive_ratio: alive as f32 / (self.size.x * self.size.y) as f32,
+            alive_ratio: alive as f32 / total,
+            birth_rate: births as f32 / total,
         }
     }
 
