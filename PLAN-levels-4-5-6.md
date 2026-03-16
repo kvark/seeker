@@ -204,13 +204,202 @@ Step 2 depends on `normalized_hash` and `connected_components` being pub.
 | 2 - Narrative | ~200 | 5 (new narrative.rs, sim, lab, main, lib) | Medium — component diffing logic |
 | 3 - Composability | ~60 | 3 (analysis, lab, main) | Low — extends existing analysis |
 
-## Open Questions
+## Open Questions — Resolved via Literature Review
 
-1. **Sampling interval for narrative**: 64 steps? 128? Should it adapt based
-   on how dynamic the simulation is?
-2. **Event diffing precision**: fuzzy matching by hash+proximity, or exact?
-   Exact is simpler but misses transformed components.
-3. **Spatial entropy grid size**: 4×4 (16 regions) seems right for 64×64 to
-   256×256 grids. Should it scale with grid size?
-4. **Composability independence threshold**: what separation distance counts
-   as "non-interacting"? Depends on max spaceship speed (c/4 for GoL gliders).
+### Q1: Sampling interval for narrative
+
+**Answer: Fixed 16-step base interval + cheap activity trigger.**
+
+The literature strongly favors a hybrid approach over pure adaptive sampling:
+
+- **apgsearch** doesn't track mid-simulation at all — it runs to completion and
+  analyzes the ash. But we need trajectory data, so we must sample.
+- **McCaskill & Packard (2019)** track components every generation, which is
+  feasible for their small grids but expensive for ours.
+- **BMC Bioinformatics (2004)** showed that per-cell activity indicators with
+  skip counters achieve 4-5x speedup in CA simulation with negligible accuracy
+  loss — but this optimizes the simulation, not the analysis.
+- **Sensor network literature** consistently shows 50-80% sample reduction
+  with threshold-based adaptive schemes, but the overhead of the adaptive logic
+  itself can neutralize gains when the per-sample cost is already low.
+
+**Recommendation**: Sample every 16 steps (cheap, predictable). Additionally,
+if `|delta_alive_count|` between consecutive `advance()` calls exceeds a
+threshold (e.g., >5% of total cells), insert an extra snapshot — this catches
+sudden mass-extinction or explosion events at near-zero cost. Once period is
+detected, stop sampling entirely (the HashLife insight: temporal regularity
+means there's nothing new to learn).
+
+16 steps over 8192 max_steps = 512 snapshots. Connected components on a 128×128
+grid is ~16K cells BFS, takes microseconds. Total overhead: <1% of simulation.
+
+### Q2: Event diffing precision
+
+**Answer: Greedy nearest-neighbor with overlap+centroid+size cost function.**
+
+The MOT (Multiple Object Tracking) literature converges on a layered approach:
+
+- **Hungarian algorithm** (O(n³)) gives optimal assignment but is overkill for
+  our scale (<50 components). At n<50, greedy nearest-neighbor produces
+  identical results in the vast majority of cases.
+- **Jonker-Volgenant** is 10x faster than Hungarian for n>200, irrelevant here.
+- **ByteTrack (ECCV 2022)** uses a two-pass matching cascade with gating
+  thresholds — first match high-confidence pairs, then handle remainders.
+- **NIST Overlap-Based Cell Tracker** uses a weighted cost function:
+  `cost = w1 * overlap + w2 * centroid_distance + w3 * size_change`
+
+**Recommendation**: Use greedy nearest-neighbor matching with a 3-term cost:
+
+```
+cost(old, new) = w1 * (1 - overlap_ratio)
+               + w2 * centroid_distance / grid_diagonal
+               + w3 * |size_old - size_new| / max(size_old, size_new)
+```
+
+With a **gating threshold**: if `cost > 0.7`, don't match (treat as
+death+birth rather than a transformed component). Unmatched old → Death or
+merge contributor. Unmatched new → Birth or split product.
+
+For splits/merges specifically: if one old component overlaps with two new
+components (both below gating threshold), that's a Split. If two old
+components overlap with one new component, that's a Merge. This handles the
+common cases without needing exact hash matching.
+
+Hash matching is still useful as a **fast path**: if `normalized_hash(old) ==
+normalized_hash(new)` and centroids are close, skip the cost calculation.
+
+### Q3: Spatial entropy grid size
+
+**Answer: 4×4 macro-grid (16 regions), with compression ratio as a second signal.**
+
+The literature reveals multiple approaches:
+
+- **Israeli & Goldenfeld**: Use block sizes 2-3 cells (absolute) for 1D ECA.
+  Block size is chosen relative to the rule neighborhood, not grid size.
+- **Javaheri Javid (EPIA 2015)**: No subdivision at all — uses conditional
+  entropy H(X|Y) between each cell and its neighbors. Sensitive to spatial
+  arrangement, unlike plain Shannon entropy.
+- **Practical consensus**: 8-16 cells per region gives meaningful per-region
+  statistics. For a 64×64 grid → 4×4 to 8×8 regions. For 128×128 → 8×8 to
+  16×16 regions.
+
+**Recommendation**: Use a 4×4 macro-grid (16 regions). This gives:
+- 64×64 grid: 16×16 cells per region (256 cells) — good statistics
+- 128×128 grid: 32×32 cells per region (1024 cells) — excellent statistics
+- 32×32 grid: 8×8 cells per region (64 cells) — marginal but usable
+
+Don't scale with grid size — fixed 4×4 is simpler and the per-region cell
+counts are already adequate for all our grid sizes (32-256).
+
+**Bonus measure**: Compression ratio as a second complexity proxy. Serialize
+the grid row-major, compress with a fast algorithm, use
+`compressed_size / raw_size` as a Kolmogorov complexity proxy. This is:
+- Nearly free (sub-millisecond for our grid sizes)
+- Spatially sensitive (unlike Shannon entropy of global density)
+- Well-validated: used alongside block entropy in CA complexity research
+  (arXiv:1304.2816)
+- Complementary to regional variance: compression catches fine-grained
+  structure that coarse regions miss
+
+### Q4: Composability independence threshold
+
+**Answer: Chebyshev distance ≥ 2 × kernel_radius between bounding boxes.**
+
+The GoL community has a precise hierarchy:
+
+| Category | Separation | Meaning |
+|---|---|---|
+| **Constellation** | Chebyshev ≥ 2 | Fully non-interacting; shared dead-cell neighborhoods impossible |
+| **Quasi still life** | Chebyshev = 1 (diagonal) | Shared dead cells, but independently stable |
+| **Pseudo still life** | Chebyshev = 1 (specific overlap) | Combined neighborhood matters |
+| **Strict still life** | N/A | Cannot decompose |
+
+For standard GoL (Moore neighborhood, radius 1), the speed of light is
+c = 1 cell/generation. Two static patterns with Chebyshev gap ≥ 2 can never
+interact.
+
+**For Seeker's probabilistic CA**: The kernel defines the effective
+neighborhood. The maximum kernel extent (max Chebyshev distance of any kernel
+entry from center) is the effective radius `r`. Two patterns separated by
+Chebyshev distance > `2r` cannot interact in a single step, and if both are
+stable/oscillating within their bounding boxes, they're permanently
+independent.
+
+**Recommendation**: Compute `kernel_radius = max(|offset.x|, |offset.y|)` over
+all kernel entries. Two components are independent if the Chebyshev distance
+between their bounding boxes is ≥ `2 * kernel_radius`. This is the
+"constellation" criterion generalized to arbitrary kernels.
+
+For dynamic patterns (spaceships), true independence requires light-cone
+analysis over the remaining simulation time: gap ≥ `kernel_radius *
+remaining_steps`. But this is too conservative — in practice, if patterns
+haven't interacted in 100+ steps and are separated by ≥ `4 * kernel_radius`,
+call them independent.
+
+**apgsearch's approach**: Uses a custom "ContagiousLife" infection-propagation
+rule to separate pseudo still lifes. This is elegant but GoL-specific. For
+Seeker's probabilistic rules, the bounding-box Chebyshev distance is simpler
+and sufficient.
+
+---
+
+## Prior Art & Key References
+
+### Component Tracking (Level 4)
+
+- **McCaskill & Packard (2019)** — "Analysing Emergent Dynamics of Evolving
+  Computation in 2D Cellular Automata," TPNC 2019. Connected component
+  labelling + 64-bit quadtree hashing + temporal tracking. The most directly
+  relevant paper for our narrative tracking.
+- **NIST Overlap-Based Cell Tracker (Chalfoun et al., 2016)** — Overlap +
+  centroid + size cost function for tracking biological cells between frames.
+  Directly transferable to CA component tracking.
+- **ByteTrack (ECCV 2022)** — Two-pass matching cascade with gating. State of
+  the art in multi-object tracking.
+- **apgsearch v5 (Adam P. Goucher)** — Runs soups to completion, classifies
+  ash via apgcode canonical hashing. No mid-simulation tracking, but the
+  separation and classification pipeline is the gold standard.
+
+### Spatial Entropy & Emergence (Level 5)
+
+- **Crutchfield & Young (1989)** — Statistical complexity C_μ via
+  epsilon-machines. The theoretical ideal: C_μ measures structure while entropy
+  rate h measures randomness. "Interesting" systems have high C_μ and moderate
+  h. Limited to 1D in practice.
+- **Shalizi (2001 thesis)** — Local statistical complexity as a spatial filter
+  for detecting coherent structures. Rare causal states (collisions, particles)
+  have high local complexity. Beautiful but computationally expensive for 2D.
+- **Lizier et al. (2007-2012)** — Information dynamics decomposition: Active
+  Information Storage (identifies oscillators/still lifes), Transfer Entropy
+  (identifies gliders as "information rivers"), information modification
+  (identifies collision/computation sites). JIDT toolkit available.
+- **Israeli & Goldenfeld (2006)** — Coarse-graining CA: if a simpler rule
+  governs coarse dynamics, the system has emergent simplification. Class 4
+  rules resist coarse-graining — that's what makes them interesting.
+- **Javaheri Javid (EPIA 2015)** — Mean information gain H(X|Y) across
+  neighbor pairs. Spatially sensitive, unlike plain Shannon entropy.
+- **Compression as Kolmogorov proxy** — Serialize grid, compress, use ratio.
+  Validated in arXiv:1304.2816 for CA complexity measurement.
+
+### Composability (Level 6)
+
+- **LifeWiki constellation/quasi/pseudo still life hierarchy** — Formal
+  definitions of component independence based on Chebyshev distance and
+  shared-neighborhood analysis.
+- **apgsearch pseudo_bangbang** — Infection-propagation algorithm for
+  separating pseudo still lifes. GoL-specific but conceptually elegant.
+- **Catagolue census** — Top 16 GoL ash objects account for >99.9% of all
+  occurrences. Classified cell coverage is implicitly the standard metric.
+- **ASAL (Sakana AI, 2024)** — Uses CLIP embeddings for open-ended CA
+  novelty. Not composability per se, but a foundation-model approach to
+  "interestingness" that could complement rule-based metrics.
+
+### Adaptive Sampling
+
+- **CUSUM / KCUSUM** — Change-point detection via cumulative sum statistics.
+  Non-parametric KCUSUM variant works without distribution assumptions.
+- **HashLife (Gosper, 1984)** — Memoizes temporal blocks; exponential speedup
+  for periodic patterns. Key insight: cache miss rate is a proxy for
+  interestingness. We apply this via: stop sampling once period is detected.
+- **BMC Bioinformatics (2004)** — Per-cell activity indicators with skip
+  counters achieve 4-5x speedup in CA simulation.
