@@ -83,10 +83,17 @@ pub fn connected_components(grid: &Grid) -> Vec<Vec<Coordinates>> {
                             if dx == 0 && dy == 0 {
                                 continue;
                             }
-                            let nx = (pos.x + dx).rem_euclid(size.x);
-                            let ny = (pos.y + dy).rem_euclid(size.y);
+                            let raw_x = pos.x + dx;
+                            let raw_y = pos.y + dy;
+                            // Use the grid's boundary mode: wrapping or dead
+                            if grid.get(raw_x, raw_y).is_none() {
+                                continue;
+                            }
+                            // For indexing visited[], use wrapped coords
+                            let nx = raw_x.rem_euclid(size.x);
+                            let ny = raw_y.rem_euclid(size.y);
                             let nidx = ny as usize * size.x as usize + nx as usize;
-                            if grid.get(nx, ny).is_some() && !visited[nidx] {
+                            if !visited[nidx] {
                                 visited[nidx] = true;
                                 queue.push_back(Coordinates { x: nx, y: ny });
                             }

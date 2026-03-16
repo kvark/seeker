@@ -2,7 +2,7 @@ use rand::{Rng as _, RngCore};
 use rustc_hash::FxHashMap;
 use std::{fmt, num::NonZeroU32};
 
-use crate::grid::{Cell, Coordinate, Coordinates, Grid, GridAnalysis};
+use crate::grid::{BoundaryMode, Cell, Coordinate, Coordinates, Grid, GridAnalysis};
 
 const BLEND_FACTOR: f32 = 0.2;
 fn blend(new: f32, old: f32) -> f32 {
@@ -91,16 +91,24 @@ pub enum DataParseError {
 
 impl Data {
     pub fn parse(&self, rng: &mut impl RngCore) -> Result<Grid, DataParseError> {
+        self.parse_with_boundary(rng, BoundaryMode::default())
+    }
+
+    pub fn parse_with_boundary(
+        &self,
+        rng: &mut impl RngCore,
+        boundary: BoundaryMode,
+    ) -> Result<Grid, DataParseError> {
         match *self {
             Self::Random {
                 width,
                 height,
                 alive_ratio,
             } => {
-                let mut grid = Grid::new(Coordinates {
-                    x: width,
-                    y: height,
-                });
+                let mut grid = Grid::with_boundary(
+                    Coordinates { x: width, y: height },
+                    boundary,
+                );
                 let count = (width as f32 * height as f32 * alive_ratio) as u32;
                 for _ in 0..count {
                     grid.init(rng.gen(), rng.gen());
@@ -113,7 +121,7 @@ impl Data {
                         * 4,
                     y: lines.len() as Coordinate,
                 };
-                let mut grid = Grid::new(size);
+                let mut grid = Grid::with_boundary(size, boundary);
                 for (y, line) in lines.iter().enumerate() {
                     for (x, ch) in line.chars().enumerate() {
                         let number = match ch {
@@ -281,6 +289,9 @@ pub struct Snap {
     pub rules: HumanRules,
     pub random_seed: u64,
     limits: Limits,
+    /// Boundary mode for the grid. Defaults to Wrap for backwards compatibility.
+    #[serde(default)]
+    pub boundary: BoundaryMode,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -375,12 +386,12 @@ impl Simulation {
     pub fn new(snap: &Snap) -> Result<Self, SnapError> {
         let mut rng = rand::SeedableRng::seed_from_u64(snap.random_seed);
         let rules = snap.rules.parse()?;
-        let grid = snap.data.parse(&mut rng)?;
+        let grid = snap.data.parse_with_boundary(&mut rng, snap.boundary)?;
         let size = grid.size();
         assert!(snap.limits.are_valid());
 
         Ok(Self {
-            grids: [grid, Grid::new(size)],
+            grids: [grid, Grid::with_boundary(size, snap.boundary)],
             grid_index: 0,
             rules,
             limits: snap.limits.clone(),
@@ -407,6 +418,7 @@ impl Simulation {
             rules: HumanRules::unparse(&self.rules),
             random_seed: self.random_seed,
             limits: self.limits.clone(),
+            boundary: self.grid().boundary(),
         }
     }
 

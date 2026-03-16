@@ -1,4 +1,5 @@
 use crate::analysis;
+use crate::grid::BoundaryMode;
 use crate::sim::{Conclusion, Data, Probability, ProbabilityTable, Simulation, Snap, Weight};
 use rand::{rngs::ThreadRng, Rng as _};
 use std::{fs, io::Write as _, mem, ops::Range, path, sync::Arc};
@@ -318,7 +319,7 @@ impl Laboratory {
             self.mutate_snap_frozen(snap);
             return;
         }
-        match self.rng.gen_range(0..4) {
+        match self.rng.gen_range(0..5) {
             0 => {
                 self.mutate_probabilities(&mut snap.rules.spawn);
             }
@@ -344,7 +345,7 @@ impl Laboratory {
                     row.as_bytes_mut()[byte_offset] = other;
                 }
             }
-            _ => {
+            3 => {
                 // size change
                 let size_power = self.rng.gen_range(self.config.size_power.clone());
                 match snap.data {
@@ -360,6 +361,13 @@ impl Laboratory {
                         log::error!("Unable to change grid size");
                     }
                 }
+            }
+            _ => {
+                // boundary mode flip
+                snap.boundary = match snap.boundary {
+                    BoundaryMode::Wrap => BoundaryMode::Dead,
+                    BoundaryMode::Dead => BoundaryMode::Wrap,
+                };
             }
         }
     }
