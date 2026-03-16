@@ -1,0 +1,9 @@
+(
+    max_active: 8,
+    max_in_flight: 20,
+    max_archive: 200,
+    size_power: (start: 7, end: 9),
+    probability_step: 0.05,
+    max_probability_weight: 8,
+    frozen_rules: true,
+)
