@@ -35,6 +35,9 @@ pub struct GridAnalysis {
     pub alive_ratio: f32,
     /// Fraction of cells that were born (dead → alive) this step.
     pub birth_rate: f32,
+    /// Variance of alive density across a 4×4 macro-grid (16 regions).
+    /// High = spatially structured; low = uniform soup or static noise.
+    pub spatial_variance: f32,
 }
 
 const NULL_CELL: Option<Cell> = None;
@@ -97,11 +100,50 @@ impl Grid {
 
     /// Analyze the grid, including a birth count from the simulation step.
     pub fn analyze_with_births(&self, births: usize) -> GridAnalysis {
-        let alive: usize = self.cells.iter().filter(|cell| cell.is_some()).count();
+        // Count alive cells per region in a 4×4 macro-grid (16 regions).
+        const REGIONS: usize = 4;
+        let mut region_alive = [0u32; REGIONS * REGIONS];
+        let mut total_alive = 0u32;
+
+        let rx = self.size.x as usize / REGIONS;
+        let ry = self.size.y as usize / REGIONS;
+        // Avoid division by zero for tiny grids
+        let rx = rx.max(1);
+        let ry = ry.max(1);
+
+        for (i, cell) in self.cells.iter().enumerate() {
+            if cell.is_some() {
+                total_alive += 1;
+                let x = i % self.size.x as usize;
+                let y = i / self.size.x as usize;
+                let ri = (x / rx).min(REGIONS - 1) + (y / ry).min(REGIONS - 1) * REGIONS;
+                region_alive[ri] += 1;
+            }
+        }
+
         let total = (self.size.x * self.size.y) as f32;
+        let region_cells = (rx * ry) as f32;
+
+        // Compute variance of regional alive densities
+        let mean_density = total_alive as f32 / (REGIONS * REGIONS) as f32 / region_cells;
+        let spatial_variance = if region_cells > 0.0 {
+            let sum_sq: f32 = region_alive
+                .iter()
+                .map(|&count| {
+                    let density = count as f32 / region_cells;
+                    let diff = density - mean_density;
+                    diff * diff
+                })
+                .sum();
+            sum_sq / (REGIONS * REGIONS) as f32
+        } else {
+            0.0
+        };
+
         GridAnalysis {
-            alive_ratio: alive as f32 / total,
+            alive_ratio: total_alive as f32 / total,
             birth_rate: births as f32 / total,
+            spatial_variance,
         }
     }
 

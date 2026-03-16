@@ -195,6 +195,8 @@ impl Laboratory {
                                     for &p in &summary.oscillators {
                                         score += if p > 2 { p.min(20) } else { 1 };
                                     }
+                                    // Composability: independent classified components
+                                    score += summary.composability_score();
                                     score
                                 } else {
                                     0
@@ -209,13 +211,23 @@ impl Laboratory {
                             // Sustained birth rate = ongoing production (guns, puffers)
                             let birth_score =
                                 (state.birth_rate_average * 5000.0).min(20.0) as usize;
-                            base + var_score + late_score + analysis_score + birth_score
+                            // Spatial structure = localized dynamics (guns, factories)
+                            let spatial_score =
+                                (state.spatial_variance_average * 5000.0).min(20.0) as usize;
+                            // Narrative richness = structural events during simulation
+                            let narrative_score =
+                                state.narrative.richness().min(100) / 5;
+                            base + var_score + late_score + analysis_score + birth_score + spatial_score + narrative_score
                         } else {
                             // Reward sustained birth rate for non-frozen mode too
                             let base = 100 - (60.0 * state.alive_ratio_average) as usize;
                             let birth_bonus =
                                 (state.birth_rate_average * 3000.0).min(15.0) as usize;
-                            base + birth_bonus
+                            let spatial_bonus =
+                                (state.spatial_variance_average * 3000.0).min(15.0) as usize;
+                            let narrative_bonus =
+                                state.narrative.richness().min(100) / 7;
+                            base + birth_bonus + spatial_bonus + narrative_bonus
                         };
                         if fit > max_fit {
                             let name = format!("e{}-{}.ron", experiment.id, status.step);
