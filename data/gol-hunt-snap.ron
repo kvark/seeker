@@ -1,7 +1,7 @@
 (
 	data: Random(
-		width: 256,
-		height: 256,
+		width: 128,
+		height: 128,
 		alive_ratio: 0.02,
 	),
 	random_seed: 1337,
@@ -20,8 +20,8 @@
 		},
 	),
 	limits: (
-		max_steps: 20000,
-		update_weight: 0.005,
+		max_steps: 5000,
+		update_weight: 0.01,
 	),
 	boundary: Dead,
 )
