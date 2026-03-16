@@ -206,9 +206,16 @@ impl Laboratory {
                             // Late stabilization = interesting transients
                             let late_score =
                                 (state.stabilized_step as f32 / 100.0).min(20.0) as usize;
-                            base + var_score + late_score + analysis_score
+                            // Sustained birth rate = ongoing production (guns, puffers)
+                            let birth_score =
+                                (state.birth_rate_average * 5000.0).min(20.0) as usize;
+                            base + var_score + late_score + analysis_score + birth_score
                         } else {
-                            100 - (60.0 * state.alive_ratio_average) as usize
+                            // Reward sustained birth rate for non-frozen mode too
+                            let base = 100 - (60.0 * state.alive_ratio_average) as usize;
+                            let birth_bonus =
+                                (state.birth_rate_average * 3000.0).min(15.0) as usize;
+                            base + birth_bonus
                         };
                         if fit > max_fit {
                             let name = format!("e{}-{}.ron", experiment.id, status.step);
