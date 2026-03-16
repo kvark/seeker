@@ -108,8 +108,13 @@ fn draw_sim(
             )
             .split(top_rects[1]);
 
+        let boundary_str = match sim.grid().boundary() {
+            grid::BoundaryMode::Wrap => "Wrap",
+            grid::BoundaryMode::Dead => "Dead",
+        };
         let para_size = w::Paragraph::new(vec![
             make_key_value("Size = ", format!("{}x{}", grid_size.x, grid_size.y)),
+            make_key_value("Boundary = ", boundary_str.to_string()),
             make_key_value("Random = ", format!("{}", sim.random_seed())),
         ])
         .block(w::Block::default().title("Info").borders(w::Borders::ALL))

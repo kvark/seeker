@@ -8,6 +8,16 @@ pub struct Coordinates {
     pub y: Coordinate,
 }
 
+/// How the grid handles out-of-bounds coordinates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BoundaryMode {
+    /// Toroidal wrapping — coordinates wrap around edges.
+    #[default]
+    Wrap,
+    /// Dead boundary — cells outside the grid are treated as empty.
+    Dead,
+}
+
 #[derive(Clone, Debug)]
 pub struct Cell {
     pub age: NonZeroU32,
@@ -17,6 +27,7 @@ pub struct Cell {
 
 pub struct Grid {
     size: Coordinates,
+    boundary: BoundaryMode,
     cells: Box<[Option<Cell>]>,
 }
 
@@ -28,8 +39,16 @@ const NULL_CELL: Option<Cell> = None;
 
 impl Grid {
     pub fn new(size: Coordinates) -> Self {
+        Self::with_boundary(size, BoundaryMode::default())
+    }
+
+    pub fn with_boundary(size: Coordinates, boundary: BoundaryMode) -> Self {
         let cells = vec![NULL_CELL; size.x as usize * size.y as usize].into_boxed_slice();
-        Self { size, cells }
+        Self { size, boundary, cells }
+    }
+
+    pub fn boundary(&self) -> BoundaryMode {
+        self.boundary
     }
 
     pub fn size(&self) -> Coordinates {
@@ -55,8 +74,19 @@ impl Grid {
     }
 
     pub fn get(&self, x: Coordinate, y: Coordinate) -> Option<&Cell> {
-        let index = self.cell_index(x, y);
-        self.cells.get(index).unwrap().as_ref()
+        match self.boundary {
+            BoundaryMode::Wrap => {
+                let index = self.cell_index(x, y);
+                self.cells[index].as_ref()
+            }
+            BoundaryMode::Dead => {
+                if x < 0 || x >= self.size.x || y < 0 || y >= self.size.y {
+                    None
+                } else {
+                    self.cells[y as usize * self.size.x as usize + x as usize].as_ref()
+                }
+            }
+        }
     }
 
     pub fn analyze(&self) -> GridAnalysis {
