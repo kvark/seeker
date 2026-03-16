@@ -37,6 +37,25 @@ pub struct AnalysisSummary {
     pub total_components: usize,
     pub unique_patterns: usize,
     pub named_patterns: Vec<&'static str>,
+    /// Fraction of alive cells belonging to classified (non-Unknown) patterns.
+    pub classified_ratio: f32,
+    /// Number of distinct recognized pattern types (still life, each osc period, each ship period).
+    pub distinct_classified_types: usize,
+    /// True if all classified components are well-separated (non-interacting).
+    pub components_independent: bool,
+}
+
+impl AnalysisSummary {
+    /// Composability score: how well the grid decomposes into independent classified patterns.
+    pub fn composability_score(&self) -> usize {
+        // Classified coverage: 0-30 points
+        let coverage = (self.classified_ratio * 30.0) as usize;
+        // Independence bonus: 10 points if all components are well-separated
+        let independence = if self.components_independent { 10 } else { 0 };
+        // Type diversity bonus: up to 10 points
+        let diversity = self.distinct_classified_types.min(3) * 3;
+        coverage + independence + diversity
+    }
 }
 
 impl std::fmt::Display for AnalysisSummary {
@@ -264,16 +283,55 @@ fn name_pattern(_hash: u64, class: &PatternClass) -> Option<&'static str> {
     }
 }
 
+/// Compute the bounding box of a component as (min_x, min_y, max_x, max_y).
+fn bounding_box(comp: &[Coordinates]) -> (Coordinate, Coordinate, Coordinate, Coordinate) {
+    let minx = comp.iter().map(|c| c.x).min().unwrap();
+    let miny = comp.iter().map(|c| c.y).min().unwrap();
+    let maxx = comp.iter().map(|c| c.x).max().unwrap();
+    let maxy = comp.iter().map(|c| c.y).max().unwrap();
+    (minx, miny, maxx, maxy)
+}
+
+/// Chebyshev distance between two bounding boxes.
+fn bbox_chebyshev_distance(
+    a: (Coordinate, Coordinate, Coordinate, Coordinate),
+    b: (Coordinate, Coordinate, Coordinate, Coordinate),
+) -> Coordinate {
+    let dx = if a.2 < b.0 {
+        b.0 - a.2
+    } else if b.2 < a.0 {
+        a.0 - b.2
+    } else {
+        0
+    };
+    let dy = if a.3 < b.1 {
+        b.1 - a.3
+    } else if b.3 < a.1 {
+        a.1 - b.3
+    } else {
+        0
+    };
+    dx.max(dy)
+}
+
 /// Analyze a grid: extract components and classify each.
 pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary) {
     let components = connected_components(grid);
     let mut patterns = Vec::with_capacity(components.len());
     let mut summary = AnalysisSummary::default();
     let mut pattern_hashes = std::collections::HashSet::new();
+    let mut classified_types = std::collections::HashSet::new();
 
     summary.total_components = components.len();
 
+    let mut total_alive = 0usize;
+    let mut classified_alive = 0usize;
+    let mut classified_bboxes = Vec::new();
+
     for comp in &components {
+        let comp_cells = comp.len();
+        total_alive += comp_cells;
+
         // Compute normalized hash for uniqueness tracking
         let minx = comp.iter().map(|c| c.x).min().unwrap();
         let miny = comp.iter().map(|c| c.y).min().unwrap();
@@ -288,15 +346,56 @@ pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary) {
         if let Some(name) = name_pattern(hash, &class) {
             summary.named_patterns.push(name);
         }
-        match &class {
-            PatternClass::StillLife { .. } => summary.still_lifes += 1,
-            PatternClass::Oscillator { period, .. } => summary.oscillators.push(*period),
-            PatternClass::Spaceship { period, .. } => summary.spaceships.push(*period),
-            _ => {}
+
+        let is_classified = match &class {
+            PatternClass::StillLife { .. } => {
+                summary.still_lifes += 1;
+                classified_types.insert("still_life");
+                true
+            }
+            PatternClass::Oscillator { period, .. } => {
+                summary.oscillators.push(*period);
+                classified_types.insert("oscillator");
+                true
+            }
+            PatternClass::Spaceship { period, .. } => {
+                summary.spaceships.push(*period);
+                classified_types.insert("spaceship");
+                true
+            }
+            _ => false,
+        };
+
+        if is_classified {
+            classified_alive += comp_cells;
+            classified_bboxes.push(bounding_box(comp));
         }
         patterns.push(class);
     }
     summary.unique_patterns = pattern_hashes.len();
+    summary.classified_ratio = if total_alive > 0 {
+        classified_alive as f32 / total_alive as f32
+    } else {
+        0.0
+    };
+    summary.distinct_classified_types = classified_types.len();
+
+    // Check independence: all classified components separated by >= 2 cells
+    // (Chebyshev distance >= 2, which is the constellation criterion for Moore neighborhood).
+    summary.components_independent = if classified_bboxes.len() > 1 {
+        let mut independent = true;
+        'outer: for i in 0..classified_bboxes.len() {
+            for j in (i + 1)..classified_bboxes.len() {
+                if bbox_chebyshev_distance(classified_bboxes[i], classified_bboxes[j]) < 2 {
+                    independent = false;
+                    break 'outer;
+                }
+            }
+        }
+        independent
+    } else {
+        true
+    };
 
     (patterns, summary)
 }

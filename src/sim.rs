@@ -3,6 +3,7 @@ use rustc_hash::FxHashMap;
 use std::{fmt, num::NonZeroU32};
 
 use crate::grid::{BoundaryMode, Cell, Coordinate, Coordinates, Grid, GridAnalysis};
+use crate::narrative;
 
 const BLEND_FACTOR: f32 = 0.2;
 fn blend(new: f32, old: f32) -> f32 {
@@ -302,6 +303,10 @@ pub struct Statistics {
     pub birth_rate_average: f32,
     /// Exponentially weighted variance of the birth rate.
     pub birth_rate_variance: f32,
+    /// Exponentially weighted average of spatial variance (regional density heterogeneity).
+    pub spatial_variance_average: f32,
+    /// Narrative event tracking: splits, merges, births, deaths of components.
+    pub narrative: narrative::NarrativeStats,
     /// Detected period of the grid state (0 = not yet detected).
     pub period: usize,
     /// Step at which periodicity was first detected.
@@ -355,6 +360,10 @@ impl Statistics {
         self.birth_rate_variance = limits.update_weight * br_offset_sq
             + (1.0 - limits.update_weight) * self.birth_rate_variance;
 
+        // Update spatial variance stats
+        self.spatial_variance_average = limits.update_weight * analysis.spatial_variance
+            + (1.0 - limits.update_weight) * self.spatial_variance_average;
+
         if self.alive_ratio_average > 0.9 {
             Err(Conclusion::Saturate)
         } else {
@@ -376,6 +385,8 @@ pub struct Simulation {
     hash_seen: FxHashMap<u64, usize>,
     /// Candidate period awaiting verification: (period, expected_hash, verify_at_step).
     candidate_period: Option<(usize, u64, usize)>,
+    /// Narrative event tracker (component diffing).
+    narrative_tracker: narrative::NarrativeTracker,
 }
 
 #[derive(Debug)]
@@ -418,11 +429,14 @@ impl Simulation {
                 alive_ratio_variance: 0.0,
                 birth_rate_average: 0.0,
                 birth_rate_variance: 0.0,
+                spatial_variance_average: 0.0,
+                narrative: narrative::NarrativeStats::default(),
                 period: 0,
                 stabilized_step: 0,
             },
             hash_seen: FxHashMap::default(),
             candidate_period: None,
+            narrative_tracker: narrative::NarrativeTracker::new(),
         })
     }
 
@@ -522,6 +536,12 @@ impl Simulation {
         }
 
         self.step += 1;
+
+        // Narrative sampling: take component snapshots at fixed intervals
+        if self.step % narrative::SAMPLE_INTERVAL == 0 && self.stats.period == 0 {
+            self.narrative_tracker.sample(grid);
+            self.stats.narrative = self.narrative_tracker.stats;
+        }
 
         // Period detection via grid hashing with verification
         if self.stats.period == 0 {
