@@ -2,10 +2,30 @@ use crate::analysis;
 use crate::grid::BoundaryMode;
 use crate::sim::{Conclusion, Data, Probability, ProbabilityTable, Simulation, Snap, Weight};
 use rand::{rngs::ThreadRng, Rng as _};
-use std::{fs, io::Write as _, mem, ops::Range, path, sync::Arc};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash as _, Hasher},
+    io::Write as _,
+    mem,
+    ops::Range,
+    path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 const UPDATE_FREQUENCY: usize = 64;
 const CHANNEL_BOUND: usize = 200;
+/// Steps before we start checking for boringness.
+const EARLY_DISCARD_WARMUP: usize = 128;
+/// Check interval for early discard (in steps).
+const EARLY_DISCARD_INTERVAL: usize = 256;
+/// If alive_ratio variance stays below this for consecutive checks, discard.
+const BORING_VARIANCE_THRESHOLD: f32 = 0.0001;
+/// Number of consecutive boring checks before discarding.
+const BORING_STREAK_LIMIT: usize = 3;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Configuration {
@@ -26,6 +46,10 @@ pub struct Experiment {
     pub conclusion: Option<Conclusion>,
     pub steps: usize,
     pub fit: usize,
+    /// Abort flag: set to true to tell the worker to stop early.
+    abort: Arc<AtomicBool>,
+    /// Number of consecutive boring variance checks.
+    boring_streak: usize,
 }
 
 impl Experiment {
@@ -38,6 +62,8 @@ struct TaskStatus {
     experiment_id: usize,
     step: usize,
     conclusion: Option<Conclusion>,
+    /// Running alive ratio variance (for early discard decisions).
+    alive_ratio_variance: f32,
 }
 
 pub struct Laboratory {
@@ -53,6 +79,10 @@ pub struct Laboratory {
     next_id: usize,
     active_dir: path::PathBuf,
     log: fs::File,
+    /// Recent conclusion signature hashes for novelty tracking.
+    novelty_hashes: Vec<u64>,
+    /// Number of early discards so far.
+    pub early_discards: usize,
 }
 
 impl Laboratory {
@@ -84,6 +114,8 @@ impl Laboratory {
             next_id: 0,
             active_dir,
             log,
+            novelty_hashes: Vec::new(),
+            early_discards: 0,
         }
     }
 
@@ -113,15 +145,31 @@ impl Laboratory {
             }
         };
 
+        let abort = Arc::new(AtomicBool::new(false));
+        let abort_clone = abort.clone();
+
         self.experiments.push(Experiment {
             id,
             snap,
             conclusion: None,
             steps: 0,
             fit: 0,
+            abort,
+            boring_streak: 0,
         });
 
         self.choir.spawn("advance").init(move |_| loop {
+            // Check abort flag
+            if abort_clone.load(Ordering::Relaxed) {
+                let _ = sender.send(TaskStatus {
+                    experiment_id: id,
+                    step: sim.last_step(),
+                    conclusion: Some(Conclusion::Extinct),
+                    alive_ratio_variance: 0.0,
+                });
+                return;
+            }
+
             let step = sim.last_step() + 1;
             match sim.advance() {
                 Ok(_) if step % UPDATE_FREQUENCY == 0 => {
@@ -130,6 +178,7 @@ impl Laboratory {
                             experiment_id: id,
                             step,
                             conclusion: None,
+                            alive_ratio_variance: sim.stats().alive_ratio_variance,
                         })
                         .is_err()
                     {
@@ -142,6 +191,7 @@ impl Laboratory {
                         experiment_id: id,
                         step,
                         conclusion: Some(conclusion),
+                        alive_ratio_variance: sim.stats().alive_ratio_variance,
                     });
                     return;
                 }
@@ -165,6 +215,28 @@ impl Laboratory {
                 .unwrap();
             assert!(experiment.conclusion.is_none());
             experiment.steps = status.step;
+
+            // Early discard: check if experiment is boring
+            if status.conclusion.is_none()
+                && status.step >= EARLY_DISCARD_WARMUP
+                && status.step % EARLY_DISCARD_INTERVAL < UPDATE_FREQUENCY
+            {
+                if status.alive_ratio_variance < BORING_VARIANCE_THRESHOLD {
+                    experiment.boring_streak += 1;
+                    if experiment.boring_streak >= BORING_STREAK_LIMIT {
+                        writeln!(
+                            self.log,
+                            "Early discard E[{}] at step {} (boring: var={:.6})",
+                            status.experiment_id, status.step, status.alive_ratio_variance
+                        )
+                        .unwrap();
+                        experiment.abort.store(true, Ordering::Relaxed);
+                        self.early_discards += 1;
+                    }
+                } else {
+                    experiment.boring_streak = 0;
+                }
+            }
 
             if let Some(conclusion) = status.conclusion {
                 writeln!(
@@ -229,6 +301,35 @@ impl Laboratory {
                                 state.narrative.richness().min(100) / 7;
                             base + birth_bonus + spatial_bonus + narrative_bonus
                         };
+                        // Novelty penalty: hash the conclusion signature and
+                        // penalize experiments that look like recent ones.
+                        let sig_hash = {
+                            let mut h = DefaultHasher::new();
+                            // Quantize key stats into buckets for similarity detection
+                            let alive_bucket = (state.alive_ratio_average * 100.0) as u32;
+                            let var_bucket = (state.alive_ratio_variance * 10000.0) as u32;
+                            let period_bucket = state.period;
+                            alive_bucket.hash(&mut h);
+                            var_bucket.hash(&mut h);
+                            period_bucket.hash(&mut h);
+                            h.finish()
+                        };
+                        let duplicates = self
+                            .novelty_hashes
+                            .iter()
+                            .filter(|&&h| h == sig_hash)
+                            .count();
+                        // Each duplicate halves the novelty bonus (up to 30 points penalty)
+                        let novelty_penalty = (duplicates * 10).min(30);
+                        self.novelty_hashes.push(sig_hash);
+                        // Keep novelty window bounded
+                        const NOVELTY_WINDOW: usize = 100;
+                        if self.novelty_hashes.len() > NOVELTY_WINDOW {
+                            self.novelty_hashes
+                                .drain(0..self.novelty_hashes.len() - NOVELTY_WINDOW);
+                        }
+
+                        let fit = fit.saturating_sub(novelty_penalty);
                         if fit > max_fit {
                             let name = format!("e{}-{}.ron", experiment.id, status.step);
                             let file = fs::File::create(self.active_dir.join(name)).unwrap();
@@ -338,75 +439,92 @@ impl Laboratory {
             self.mutate_snap_frozen(snap);
             return;
         }
-        match self.rng.gen_range(0..5) {
-            0 => {
-                self.mutate_probabilities(&mut snap.rules.spawn);
-            }
-            1 => {
-                self.mutate_probabilities(&mut snap.rules.keep);
-            }
-            2 => {
-                let row_index = self.rng.gen_range(0..snap.rules.kernel.len());
-                let row = &mut snap.rules.kernel[row_index];
-                let candidates = row
-                    .char_indices()
-                    .filter(|(_, c)| c.is_numeric())
-                    .collect::<Vec<_>>();
-                let (byte_offset, ch) = candidates[self.rng.gen_range(0..candidates.len())];
-                let other = if ch == '0' {
-                    b'1'
-                } else if ch == '5' {
-                    b'4'
-                } else {
-                    [ch as u8 - 1, ch as u8 + 1][self.rng.gen_range(0..2)]
-                };
-                unsafe {
-                    row.as_bytes_mut()[byte_offset] = other;
+        // Apply 1-3 mutations for faster co-adaptation
+        let num_mutations = match self.rng.gen_range(0..10) {
+            0..=4 => 1,
+            5..=7 => 2,
+            _ => 3,
+        };
+        for _ in 0..num_mutations {
+            match self.rng.gen_range(0..5) {
+                0 => {
+                    self.mutate_probabilities(&mut snap.rules.spawn);
                 }
-            }
-            3 => {
-                // size change
-                let size_power = self.rng.gen_range(self.config.size_power.clone());
-                match snap.data {
-                    Data::Random {
-                        ref mut width,
-                        ref mut height,
-                        alive_ratio: _,
-                    } => {
-                        *width = 1 << size_power;
-                        *height = 1 << size_power;
-                    }
-                    Data::Grid(_) => {
-                        log::error!("Unable to change grid size");
+                1 => {
+                    self.mutate_probabilities(&mut snap.rules.keep);
+                }
+                2 => {
+                    let row_index = self.rng.gen_range(0..snap.rules.kernel.len());
+                    let row = &mut snap.rules.kernel[row_index];
+                    let candidates = row
+                        .char_indices()
+                        .filter(|(_, c)| c.is_numeric())
+                        .collect::<Vec<_>>();
+                    let (byte_offset, ch) = candidates[self.rng.gen_range(0..candidates.len())];
+                    let other = if ch == '0' {
+                        b'1'
+                    } else if ch == '5' {
+                        b'4'
+                    } else {
+                        [ch as u8 - 1, ch as u8 + 1][self.rng.gen_range(0..2)]
+                    };
+                    unsafe {
+                        row.as_bytes_mut()[byte_offset] = other;
                     }
                 }
-            }
-            _ => {
-                // boundary mode flip
-                snap.boundary = match snap.boundary {
-                    BoundaryMode::Wrap => BoundaryMode::Dead,
-                    BoundaryMode::Dead => BoundaryMode::Wrap,
-                };
+                3 => {
+                    // size change
+                    let size_power = self.rng.gen_range(self.config.size_power.clone());
+                    match snap.data {
+                        Data::Random {
+                            ref mut width,
+                            ref mut height,
+                            alive_ratio: _,
+                        } => {
+                            *width = 1 << size_power;
+                            *height = 1 << size_power;
+                        }
+                        Data::Grid(_) => {
+                            log::error!("Unable to change grid size");
+                        }
+                    }
+                }
+                _ => {
+                    // boundary mode flip
+                    snap.boundary = match snap.boundary {
+                        BoundaryMode::Wrap => BoundaryMode::Dead,
+                        BoundaryMode::Dead => BoundaryMode::Wrap,
+                    };
+                }
             }
         }
     }
 
     /// Mutation for frozen_rules mode: only mutate initial conditions.
     /// Uses "soup in a box" approach — small dense random patch in a larger grid.
+    /// Applies 1-3 mutations (Poisson-ish) for faster co-adaptation.
     fn mutate_snap_frozen(&mut self, snap: &mut Snap) {
-        match self.rng.gen_range(0..10) {
-            0..=5 => {
-                // 60%: create a new random soup (small patch in larger grid)
-                self.create_soup(snap);
-            }
-            6..=8 => {
-                // 30%: flip random cells in existing grid (exploitation)
-                let count = self.rng.gen_range(1..=5);
-                self.materialize_and_flip(snap, count);
-            }
-            _ => {
-                // 10%: create soup with different parameters
-                self.create_soup(snap);
+        // Number of mutations: 1 (50%), 2 (30%), 3 (20%)
+        let num_mutations = match self.rng.gen_range(0..10) {
+            0..=4 => 1,
+            5..=7 => 2,
+            _ => 3,
+        };
+        for _ in 0..num_mutations {
+            match self.rng.gen_range(0..10) {
+                0..=5 => {
+                    // 60%: create a new random soup (small patch in larger grid)
+                    self.create_soup(snap);
+                }
+                6..=8 => {
+                    // 30%: flip random cells in existing grid (exploitation)
+                    let count = self.rng.gen_range(1..=5);
+                    self.materialize_and_flip(snap, count);
+                }
+                _ => {
+                    // 10%: just change the random seed (same pattern, different RNG trajectory)
+                    snap.random_seed = self.rng.gen();
+                }
             }
         }
     }
