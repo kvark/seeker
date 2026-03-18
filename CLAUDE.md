@@ -171,79 +171,9 @@ For a 128×128 grid = 16,384 bits = 512 u32s = 2KB per grid.
 No need to transfer full grids back to CPU. Only transfer per-grid statistics
 (alive count, birth count, spatial variance) for fitness evaluation.
 
-### Compute Shader (WGSL)
+### Compute Shader
 
-```
-// One workgroup per grid, threads cooperate on cells
-@group(0) @binding(0) var<storage, read> grids_in: array<u32>;
-@group(0) @binding(1) var<storage, read_write> grids_out: array<u32>;
-@group(0) @binding(2) var<storage, read_write> stats: array<GridStats>;
-@group(0) @binding(3) var<uniform> params: SimParams;
-
-struct SimParams {
-    grid_width: u32,
-    grid_height: u32,
-    words_per_grid: u32,
-    num_grids: u32,
-    // RNG counter (for probabilistic rules)
-    step: u32,
-}
-
-struct GridStats {
-    alive_count: atomic<u32>,
-    birth_count: atomic<u32>,
-    region_alive: array<atomic<u32>, 16>,  // 4x4 macro-grid
-}
-
-@compute @workgroup_size(256)
-fn ca_step(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let grid_idx = gid.y;  // which grid
-    let cell_idx = gid.x;  // which cell (linear)
-    if grid_idx >= params.num_grids { return; }
-
-    let x = cell_idx % params.grid_width;
-    let y = cell_idx / params.grid_width;
-    if y >= params.grid_height { return; }
-
-    let base = grid_idx * params.words_per_grid;
-
-    // Count neighbors (standard Moore neighborhood)
-    var count: u32 = 0u;
-    for (var dy: i32 = -1; dy <= 1; dy++) {
-        for (var dx: i32 = -1; dx <= 1; dx++) {
-            if dx == 0 && dy == 0 { continue; }
-            let nx = (i32(x) + dx + i32(params.grid_width)) % i32(params.grid_width);
-            let ny = (i32(y) + dy + i32(params.grid_height)) % i32(params.grid_height);
-            let ni = u32(ny) * params.grid_width + u32(nx);
-            let word = grids_in[base + ni / 32u];
-            count += (word >> (ni % 32u)) & 1u;
-        }
-    }
-
-    // B3/S23 rule (deterministic GoL)
-    let ci = y * params.grid_width + x;
-    let old_word = grids_in[base + ci / 32u];
-    let alive = (old_word >> (ci % 32u)) & 1u;
-    let new_alive = select(
-        select(0u, 1u, count == 3u),           // dead: birth if 3
-        select(0u, 1u, count == 2u || count == 3u),  // alive: survive if 2-3
-        alive == 1u
-    );
-
-    // Atomic OR into output (each thread writes one bit)
-    if new_alive == 1u {
-        atomicOr(&grids_out[base + ci / 32u], 1u << (ci % 32u));
-        atomicAdd(&stats[grid_idx].alive_count, 1u);
-        if alive == 0u {
-            atomicAdd(&stats[grid_idx].birth_count, 1u);
-        }
-        // Spatial variance: accumulate into 4x4 region
-        let rx = x * 4u / params.grid_width;
-        let ry = y * 4u / params.grid_height;
-        atomicAdd(&stats[grid_idx].region_alive[ry * 4u + rx], 1u);
-    }
-}
-```
+See `src/shaders/ca_step.wgsl` for the WGSL compute shader implementation.
 
 ### blade-graphics Integration Steps
 

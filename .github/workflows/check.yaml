@@ -18,5 +18,8 @@ jobs:
     - name: Check Basics
       run: cargo check --workspace --no-default-features
 
+    - name: Install lavapipe
+      run: sudo apt-get update -qq && sudo apt-get install -y mesa-vulkan-drivers
+
     - name: Test All
       run: cargo test --workspace --all-features
