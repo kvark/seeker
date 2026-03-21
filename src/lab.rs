@@ -1,13 +1,13 @@
 use crate::analysis;
 use crate::grid::BoundaryMode;
-use crate::sim::{Conclusion, Data, Probability, ProbabilityTable, Simulation, Snap, Weight};
+use crate::sim::{
+    Conclusion, Data, Probability, ProbabilityTable, Simulation, Snap, Statistics, Weight,
+};
 use rand::{rngs::ThreadRng, Rng as _};
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::HashMap,
     fs,
-    hash::{Hash as _, Hasher},
     io::Write as _,
-    mem,
     ops::Range,
     path,
     sync::{
@@ -26,6 +26,56 @@ const EARLY_DISCARD_INTERVAL: usize = 256;
 const BORING_VARIANCE_THRESHOLD: f32 = 0.0001;
 /// Number of consecutive boring checks before discarding.
 const BORING_STREAK_LIMIT: usize = 3;
+
+// --- MAP-Elites behavior space ---
+// Axis 1: alive_ratio_average bucketed into density bins
+// Axis 2: "interestingness" combining transient ships, oscillator period, narrative
+const MAP_DENSITY_BINS: u8 = 10;
+const MAP_INTEREST_BINS: u8 = 8;
+
+/// A cell in the MAP-Elites behavior space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct BehaviorCell {
+    density: u8,
+    interest: u8,
+}
+
+impl BehaviorCell {
+    fn from_stats(stats: &Statistics) -> Self {
+        // Density axis: alive_ratio_average in [0, 0.10] → 10 bins
+        let density = ((stats.alive_ratio_average * 100.0) as u8).min(MAP_DENSITY_BINS - 1);
+        // Interest axis: composite score bucketed
+        let raw_interest = stats.transient_spaceships as u32 * 3
+            + stats.max_oscillator_period.saturating_sub(1) as u32 * 4
+            + stats.narrative.event_diversity() as u32 * 2
+            + if stats.alive_ratio_variance > 0.001 {
+                2
+            } else {
+                0
+            };
+        let interest = match raw_interest {
+            0 => 0,
+            1..=2 => 1,
+            3..=5 => 2,
+            6..=10 => 3,
+            11..=18 => 4,
+            19..=30 => 5,
+            31..=50 => 6,
+            _ => 7,
+        };
+        BehaviorCell {
+            density: density.min(MAP_DENSITY_BINS - 1),
+            interest: interest.min(MAP_INTEREST_BINS - 1),
+        }
+    }
+}
+
+/// Entry in the MAP-Elites archive: the best experiment for a behavior cell.
+struct EliteEntry {
+    snap: Snap,
+    fit: usize,
+    id: usize,
+}
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Configuration {
@@ -79,10 +129,12 @@ pub struct Laboratory {
     next_id: usize,
     active_dir: path::PathBuf,
     log: fs::File,
-    /// Recent conclusion signature hashes for novelty tracking.
-    novelty_hashes: Vec<u64>,
+    /// MAP-Elites archive: best experiment per behavior cell.
+    elite_map: HashMap<BehaviorCell, EliteEntry>,
     /// Number of early discards so far.
     pub early_discards: usize,
+    /// Total concluded experiments (for random injection scheduling).
+    total_concluded: usize,
 }
 
 impl Laboratory {
@@ -114,13 +166,24 @@ impl Laboratory {
             next_id: 0,
             active_dir,
             log,
-            novelty_hashes: Vec::new(),
+            elite_map: HashMap::new(),
             early_discards: 0,
+            total_concluded: 0,
         }
     }
 
     pub fn experiments(&self) -> &[Experiment] {
         &self.experiments
+    }
+
+    /// Number of occupied cells in the MAP-Elites behavior map.
+    pub fn map_coverage(&self) -> usize {
+        self.elite_map.len()
+    }
+
+    /// Total possible cells in the MAP-Elites behavior map.
+    pub fn map_capacity(&self) -> usize {
+        MAP_DENSITY_BINS as usize * MAP_INTEREST_BINS as usize
     }
 
     pub fn add_experiment(&mut self, snap: Snap, parent_id: usize) {
@@ -199,22 +262,83 @@ impl Laboratory {
         });
     }
 
+    /// Compute fitness score for a concluded experiment.
+    fn compute_fitness(frozen_rules: bool, conclusion: &Conclusion) -> usize {
+        match conclusion {
+            Conclusion::Extinct | Conclusion::Saturate => 0,
+            Conclusion::Done(ref state, ref snap) => {
+                if frozen_rules {
+                    let mut dummy_rng =
+                        <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0);
+                    let analysis_score = if let Ok(grid) = snap.data.parse(&mut dummy_rng) {
+                        let (_, summary) = analysis::analyze_grid(&grid);
+                        let mut score = 0usize;
+                        score += summary.unique_patterns.min(20) * 2;
+                        score += summary.spaceships.len() * 30;
+                        for &p in &summary.oscillators {
+                            score += if p > 2 { p.min(20) } else { 1 };
+                        }
+                        score += summary.composability_score();
+                        score
+                    } else {
+                        0
+                    };
+
+                    let base = 20usize;
+                    let var_score = (state.alive_ratio_variance * 2000.0).min(20.0) as usize;
+                    let late_score = (state.stabilized_step as f32 / 100.0).min(20.0) as usize;
+                    let birth_score = (state.birth_rate_average * 5000.0).min(20.0) as usize;
+                    let spatial_score =
+                        (state.spatial_variance_average * 5000.0).min(20.0) as usize;
+                    let narrative_score = state.narrative.richness().min(100) / 5;
+                    let transient_ship_score = state.transient_spaceships.min(10) * 5;
+                    let high_period_score = if state.max_oscillator_period > 2 {
+                        state.max_oscillator_period.min(20) * 2
+                    } else {
+                        0
+                    };
+                    base + var_score
+                        + late_score
+                        + analysis_score
+                        + birth_score
+                        + spatial_score
+                        + narrative_score
+                        + transient_ship_score
+                        + high_period_score
+                } else {
+                    let base = 100 - (60.0 * state.alive_ratio_average) as usize;
+                    let birth_bonus = (state.birth_rate_average * 3000.0).min(15.0) as usize;
+                    let spatial_bonus =
+                        (state.spatial_variance_average * 3000.0).min(15.0) as usize;
+                    let narrative_bonus = state.narrative.richness().min(100) / 7;
+                    base + birth_bonus + spatial_bonus + narrative_bonus
+                }
+            }
+            Conclusion::Crash => 0,
+        }
+    }
+
+    /// Select a parent snap from the MAP-Elites archive.
+    /// Uniform selection across occupied cells = diversity pressure.
+    fn select_parent(&mut self) -> Option<(Snap, usize)> {
+        if self.elite_map.is_empty() {
+            return None;
+        }
+        let keys: Vec<BehaviorCell> = self.elite_map.keys().cloned().collect();
+        let idx = self.rng.gen_range(0..keys.len());
+        let entry = &self.elite_map[&keys[idx]];
+        Some((entry.snap.clone(), entry.id))
+    }
+
     pub fn update(&mut self) {
         while let Ok(status) = self.receiver.try_recv() {
-            let max_fit = self
+            let exp_idx = self
                 .experiments
                 .iter()
-                .map(|exp| exp.fit)
-                .max()
-                .unwrap_or_default();
-
-            let experiment = self
-                .experiments
-                .iter_mut()
-                .find(|exp| exp.id == status.experiment_id)
+                .position(|exp| exp.id == status.experiment_id)
                 .unwrap();
-            assert!(experiment.conclusion.is_none());
-            experiment.steps = status.step;
+            assert!(self.experiments[exp_idx].conclusion.is_none());
+            self.experiments[exp_idx].steps = status.step;
 
             // Early discard: check if experiment is boring
             if status.conclusion.is_none()
@@ -222,216 +346,126 @@ impl Laboratory {
                 && status.step % EARLY_DISCARD_INTERVAL < UPDATE_FREQUENCY
             {
                 if status.alive_ratio_variance < BORING_VARIANCE_THRESHOLD {
-                    experiment.boring_streak += 1;
-                    if experiment.boring_streak >= BORING_STREAK_LIMIT {
+                    self.experiments[exp_idx].boring_streak += 1;
+                    if self.experiments[exp_idx].boring_streak >= BORING_STREAK_LIMIT {
                         writeln!(
                             self.log,
                             "Early discard E[{}] at step {} (boring: var={:.6})",
                             status.experiment_id, status.step, status.alive_ratio_variance
                         )
                         .unwrap();
-                        experiment.abort.store(true, Ordering::Relaxed);
+                        self.experiments[exp_idx]
+                            .abort
+                            .store(true, Ordering::Relaxed);
                         self.early_discards += 1;
                     }
                 } else {
-                    experiment.boring_streak = 0;
+                    self.experiments[exp_idx].boring_streak = 0;
                 }
             }
 
             if let Some(conclusion) = status.conclusion {
+                let exp_id = self.experiments[exp_idx].id;
                 writeln!(
                     self.log,
                     "Conclude E[{}] as {} at step {}",
-                    status.experiment_id, conclusion, status.step
+                    exp_id, conclusion, status.step
                 )
                 .unwrap();
 
-                experiment.fit = match conclusion {
-                    Conclusion::Extinct | Conclusion::Saturate => {
-                        mem::size_of::<usize>() * 8 - status.step.leading_zeros() as usize
-                    }
-                    Conclusion::Done(ref state, ref snap) => {
-                        let fit = if self.config.frozen_rules {
-                            // GoL fitness: analyze final grid patterns directly
-                            let mut dummy_rng =
-                                <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0);
-                            let analysis_score =
-                                if let Ok(grid) = snap.data.parse(&mut dummy_rng) {
-                                    let (_, summary) = analysis::analyze_grid(&grid);
-                                    let mut score = 0usize;
-                                    // Reward unique pattern diversity
-                                    score += summary.unique_patterns.min(20) * 2;
-                                    // Big reward for spaceships (gliders!)
-                                    score += summary.spaceships.len() * 30;
-                                    // Reward higher-period oscillators
-                                    for &p in &summary.oscillators {
-                                        score += if p > 2 { p.min(20) } else { 1 };
-                                    }
-                                    // Composability: independent classified components
-                                    score += summary.composability_score();
-                                    score
-                                } else {
-                                    0
-                                };
+                let fit = Self::compute_fitness(self.config.frozen_rules, &conclusion);
+                self.experiments[exp_idx].fit = fit;
 
-                            let base = 20usize;
-                            let var_score =
-                                (state.alive_ratio_variance * 2000.0).min(20.0) as usize;
-                            // Late stabilization = interesting transients
-                            let late_score =
-                                (state.stabilized_step as f32 / 100.0).min(20.0) as usize;
-                            // Sustained birth rate = ongoing production (guns, puffers)
-                            let birth_score =
-                                (state.birth_rate_average * 5000.0).min(20.0) as usize;
-                            // Spatial structure = localized dynamics (guns, factories)
-                            let spatial_score =
-                                (state.spatial_variance_average * 5000.0).min(20.0) as usize;
-                            // Narrative richness = structural events during simulation
-                            let narrative_score =
-                                state.narrative.richness().min(100) / 5;
-                            // Transient spaceships = very interesting (gliders, etc.)
-                            let transient_ship_score =
-                                state.transient_spaceships.min(10) * 5;
-                            // High-period oscillators detected anytime
-                            let high_period_score =
-                                if state.max_oscillator_period > 2 {
-                                    state.max_oscillator_period.min(20) * 2
-                                } else {
-                                    0
-                                };
-                            base + var_score + late_score + analysis_score + birth_score + spatial_score + narrative_score + transient_ship_score + high_period_score
-                        } else {
-                            // Reward sustained birth rate for non-frozen mode too
-                            let base = 100 - (60.0 * state.alive_ratio_average) as usize;
-                            let birth_bonus =
-                                (state.birth_rate_average * 3000.0).min(15.0) as usize;
-                            let spatial_bonus =
-                                (state.spatial_variance_average * 3000.0).min(15.0) as usize;
-                            let narrative_bonus =
-                                state.narrative.richness().min(100) / 7;
-                            base + birth_bonus + spatial_bonus + narrative_bonus
-                        };
-                        // Novelty penalty: hash the conclusion signature and
-                        // penalize experiments that look like recent ones.
-                        let sig_hash = {
-                            let mut h = DefaultHasher::new();
-                            // Quantize key stats into buckets for similarity detection
-                            let alive_bucket = (state.alive_ratio_average * 100.0) as u32;
-                            let var_bucket = (state.alive_ratio_variance * 10000.0) as u32;
-                            let period_bucket = state.period;
-                            alive_bucket.hash(&mut h);
-                            var_bucket.hash(&mut h);
-                            period_bucket.hash(&mut h);
-                            h.finish()
-                        };
-                        let duplicates = self
-                            .novelty_hashes
-                            .iter()
-                            .filter(|&&h| h == sig_hash)
-                            .count();
-                        // Each duplicate halves the novelty bonus (up to 30 points penalty)
-                        let novelty_penalty = (duplicates * 10).min(30);
-                        self.novelty_hashes.push(sig_hash);
-                        // Keep novelty window bounded
-                        const NOVELTY_WINDOW: usize = 100;
-                        if self.novelty_hashes.len() > NOVELTY_WINDOW {
-                            self.novelty_hashes
-                                .drain(0..self.novelty_hashes.len() - NOVELTY_WINDOW);
-                        }
-
-                        let fit = fit.saturating_sub(novelty_penalty);
-                        if fit > max_fit {
-                            let name = format!("e{}-{}.ron", experiment.id, status.step);
-                            let file = fs::File::create(self.active_dir.join(name)).unwrap();
-                            ron::ser::to_writer_pretty(
-                                file,
-                                snap,
-                                ron::ser::PrettyConfig::default(),
-                            )
-                            .unwrap();
-                        }
-                        fit
+                // MAP-Elites: insert into behavior map if better than current occupant
+                if let Conclusion::Done(ref state, ref snap) = conclusion {
+                    let cell = BehaviorCell::from_stats(state);
+                    let dominated = self
+                        .elite_map
+                        .get(&cell)
+                        .map_or(true, |existing| fit > existing.fit);
+                    if dominated {
+                        writeln!(
+                            self.log,
+                            "  MAP[d={},i={}] E[{}] fit={} (new elite)",
+                            cell.density, cell.interest, exp_id, fit
+                        )
+                        .unwrap();
+                        let name = format!("e{}-{}.ron", exp_id, status.step);
+                        let file = fs::File::create(self.active_dir.join(name)).unwrap();
+                        ron::ser::to_writer_pretty(
+                            file,
+                            snap,
+                            ron::ser::PrettyConfig::default(),
+                        )
+                        .unwrap();
+                        self.elite_map.insert(
+                            cell,
+                            EliteEntry {
+                                snap: self.experiments[exp_idx].snap.clone(),
+                                fit,
+                                id: exp_id,
+                            },
+                        );
                     }
-                    Conclusion::Crash => 0,
-                };
-                experiment.conclusion = Some(conclusion);
+                }
+
+                self.total_concluded += 1;
+                self.experiments[exp_idx].conclusion = Some(conclusion);
             }
         }
 
-        // Prune concluded experiments to keep only the best `max_archive`.
-        // Active (in-flight) experiments are always retained.
-        let concluded_count = self
-            .experiments
-            .iter()
-            .filter(|ex| ex.conclusion.is_some())
-            .count();
-        if concluded_count > self.config.max_archive {
-            // Find the fitness threshold: sort concluded fitnesses descending,
-            // keep the top max_archive.
-            let mut concluded_fits: Vec<usize> = self
+        // Prune concluded experiments — only keep active ones + a small recent buffer.
+        // The MAP-Elites archive is the real memory, not the experiment list.
+        self.experiments
+            .retain(|ex| ex.conclusion.is_none() || ex.fit > 0);
+        if self.experiments.len() > self.config.max_archive + self.config.max_active {
+            // Keep active experiments and the best concluded ones
+            let active_count = self.experiments.iter().filter(|e| e.conclusion.is_none()).count();
+            let max_concluded = self.config.max_archive;
+            let mut concluded: Vec<usize> = self
                 .experiments
                 .iter()
-                .filter(|ex| ex.conclusion.is_some())
-                .map(|ex| ex.fit)
+                .enumerate()
+                .filter(|(_, e)| e.conclusion.is_some())
+                .map(|(i, _)| i)
                 .collect();
-            concluded_fits.sort_unstable_by(|a, b| b.cmp(a));
-            let min_fit = concluded_fits[self.config.max_archive - 1];
-            let mut kept = 0;
-            self.experiments.retain(|ex| {
-                if ex.conclusion.is_none() {
-                    return true; // always keep active
-                }
-                if ex.fit >= min_fit && kept < self.config.max_archive {
-                    kept += 1;
-                    true
-                } else {
-                    false
-                }
-            });
-        }
-
-        let mut total_fit = 0;
-        let mut current_active = 0;
-        for ex in self.experiments.iter() {
-            if ex.conclusion.is_some() {
-                total_fit += ex.fit
-            } else {
-                current_active += 1;
+            if concluded.len() > max_concluded {
+                concluded.sort_by_key(|&i| std::cmp::Reverse(self.experiments[i].fit));
+                let to_remove: std::collections::HashSet<usize> =
+                    concluded[max_concluded..].iter().cloned().collect();
+                let mut idx = 0;
+                self.experiments.retain(|_| {
+                    let keep = !to_remove.contains(&idx);
+                    idx += 1;
+                    keep
+                });
             }
+            let _ = active_count; // suppress unused warning
         }
 
-        // Batch spawning: fill all available slots at once.
+        // Count active experiments
+        let current_active = self
+            .experiments
+            .iter()
+            .filter(|ex| ex.conclusion.is_none())
+            .count();
+
+        // Batch spawning: fill all available slots
         let slots_to_fill = self.config.max_active.saturating_sub(current_active);
         for _ in 0..slots_to_fill {
-            let parent = if total_fit != 0 {
-                let mut cutoff = self.rng.gen_range(0..total_fit);
-                self.experiments
-                    .iter_mut()
-                    .find(|ex| {
-                        if ex.conclusion.is_some() {
-                            if cutoff < ex.fit {
-                                true
-                            } else {
-                                cutoff -= ex.fit;
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap()
-            } else {
-                if self.experiments.is_empty() {
-                    break;
+            // Every 10th experiment: random injection (not from any parent)
+            let use_random = self.total_concluded > 0 && self.rng.gen_range(0..10) == 0;
+            if use_random || self.elite_map.is_empty() {
+                // Fresh random soup — explores new regions of behavior space
+                let snap = self.experiments.first().map(|e| e.snap.clone());
+                if let Some(mut snap) = snap {
+                    self.create_soup(&mut snap);
+                    self.add_experiment(snap, 0);
                 }
-                let index = self.rng.gen_range(0..self.experiments.len());
-                &mut self.experiments[index]
-            };
-
-            let mut snap = parent.snap.clone();
-            let parent_id = parent.id;
-            self.mutate_snap(&mut snap);
-            self.add_experiment(snap, parent_id);
+            } else if let Some((mut snap, parent_id)) = self.select_parent() {
+                self.mutate_snap(&mut snap);
+                self.add_experiment(snap, parent_id);
+            }
         }
     }
 
@@ -516,30 +550,26 @@ impl Laboratory {
     }
 
     /// Mutation for frozen_rules mode: only mutate initial conditions.
-    /// Uses "soup in a box" approach — small dense random patch in a larger grid.
-    /// Applies 1-3 mutations (Poisson-ish) for faster co-adaptation.
+    /// Balanced between exploration (new soups) and exploitation (local edits).
     fn mutate_snap_frozen(&mut self, snap: &mut Snap) {
-        // Number of mutations: 1 (50%), 2 (30%), 3 (20%)
-        let num_mutations = match self.rng.gen_range(0..10) {
-            0..=4 => 1,
-            5..=7 => 2,
-            _ => 3,
-        };
-        for _ in 0..num_mutations {
-            match self.rng.gen_range(0..10) {
-                0..=5 => {
-                    // 60%: create a new random soup (small patch in larger grid)
-                    self.create_soup(snap);
-                }
-                6..=8 => {
-                    // 30%: flip random cells in existing grid (exploitation)
-                    let count = self.rng.gen_range(1..=5);
-                    self.materialize_and_flip(snap, count);
-                }
-                _ => {
-                    // 10%: just change the random seed (same pattern, different RNG trajectory)
-                    snap.random_seed = self.rng.gen();
-                }
+        match self.rng.gen_range(0..10) {
+            0..=2 => {
+                // 30%: fresh random soup — pure exploration
+                self.create_soup(snap);
+            }
+            3..=5 => {
+                // 30%: focused flip — small perturbation near existing alive cells
+                let count = self.rng.gen_range(1..=8);
+                self.focused_flip(snap, count);
+            }
+            6..=7 => {
+                // 20%: add a second small soup patch nearby — creates multi-center dynamics
+                self.add_satellite_soup(snap);
+            }
+            _ => {
+                // 20%: symmetric soup — bilateral or 4-fold symmetry
+                // Many interesting patterns (pulsars, HWSS) have symmetry
+                self.create_symmetric_soup(snap);
             }
         }
     }
@@ -579,9 +609,121 @@ impl Laboratory {
         snap.random_seed = self.rng.gen();
     }
 
-    /// Convert Data::Random to Data::Grid (materializing the actual cells),
-    /// then flip `count` random cells.
-    fn materialize_and_flip(&mut self, snap: &mut Snap, count: usize) {
+    /// Add a second small soup patch near the existing alive cells.
+    /// Creates multi-center initial conditions that can produce interesting collisions.
+    fn add_satellite_soup(&mut self, snap: &mut Snap) {
+
+        // Materialize first
+        if let Data::Random { .. } = &snap.data {
+            let mut sim_rng =
+                <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(snap.random_seed);
+            if let Ok(grid) = snap.data.parse(&mut sim_rng) {
+                snap.data = Data::unparse(&grid);
+            } else {
+                self.create_soup(snap);
+                return;
+            }
+        }
+
+        if let Data::Grid(ref lines) = snap.data {
+            let height = lines.len() as i32;
+            let width = lines[0].len() as i32 * 4;
+
+            // Find bounding box of existing alive cells
+            let (mut minx, mut maxx, mut miny, mut maxy) = (width, 0i32, height, 0i32);
+            for (y, line) in lines.iter().enumerate() {
+                for (ci, ch) in line.chars().enumerate() {
+                    let val = match ch {
+                        '0' => 0,
+                        '1'..='9' => ch as u8 - b'0',
+                        'a'..='f' => 10 + ch as u8 - b'a',
+                        _ => 0,
+                    };
+                    if val > 0 {
+                        let x = ci as i32 * 4;
+                        minx = minx.min(x);
+                        maxx = maxx.max(x + 3);
+                        miny = miny.min(y as i32);
+                        maxy = maxy.max(y as i32);
+                    }
+                }
+            }
+
+            if minx >= maxx {
+                self.create_soup(snap);
+                return;
+            }
+
+            // Place a small (3-8 cell) satellite patch offset from the existing soup
+            let satellite_size = self.rng.gen_range(3..=8);
+            let offset_dist = self.rng.gen_range(5..=20);
+            let angle = self.rng.gen_range(0..4);
+            let (dx, dy) = match angle {
+                0 => (offset_dist, 0),
+                1 => (-offset_dist, 0),
+                2 => (0, offset_dist),
+                _ => (0, -offset_dist),
+            };
+            let cx = ((minx + maxx) / 2 + dx).clamp(satellite_size, width - satellite_size);
+            let cy = ((miny + maxy) / 2 + dy).clamp(satellite_size, height - satellite_size);
+
+            // Parse, add cells, unparse
+            let mut sim_rng =
+                <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(snap.random_seed);
+            if let Ok(mut grid) = snap.data.parse(&mut sim_rng) {
+                let count = (satellite_size as f32 * satellite_size as f32 * 0.5) as usize;
+                for _ in 0..count {
+                    let x = cx + self.rng.gen_range(-satellite_size..=satellite_size);
+                    let y = cy + self.rng.gen_range(-satellite_size..=satellite_size);
+                    if x >= 0 && x < width && y >= 0 && y < height {
+                        grid.init(x, y);
+                    }
+                }
+                snap.data = Data::unparse(&grid);
+            }
+        }
+        snap.random_seed = self.rng.gen();
+    }
+
+    /// Create a soup with bilateral or 4-fold symmetry.
+    /// Many interesting GoL patterns (pulsars, spaceships) have symmetry.
+    fn create_symmetric_soup(&mut self, snap: &mut Snap) {
+        use crate::grid::{Coordinates, Grid};
+
+        let grid_power = self.rng.gen_range(self.config.size_power.clone());
+        let grid_size = 1i32 << grid_power;
+        let soup_half = self.rng.gen_range(4..=12);
+        let density: f32 = self.rng.gen_range(0.30..0.50);
+        let four_fold = self.rng.gen_range(0..3) == 0; // 33% chance of 4-fold symmetry
+
+        let mut grid = Grid::new(Coordinates {
+            x: grid_size,
+            y: grid_size,
+        });
+
+        let cx = grid_size / 2;
+        let cy = grid_size / 2;
+        let cell_count = (soup_half as f32 * soup_half as f32 * density) as usize;
+
+        for _ in 0..cell_count {
+            let dx = self.rng.gen_range(0..soup_half);
+            let dy = self.rng.gen_range(0..soup_half);
+            // Place cell and its mirror(s)
+            grid.init(cx + dx, cy + dy);
+            grid.init(cx - dx - 1, cy + dy); // horizontal mirror
+            if four_fold {
+                grid.init(cx + dx, cy - dy - 1); // vertical mirror
+                grid.init(cx - dx - 1, cy - dy - 1); // both
+            }
+        }
+
+        snap.data = Data::unparse(&grid);
+        snap.random_seed = self.rng.gen();
+    }
+
+    /// Flip cells near existing alive cells (structure-preserving mutation).
+    /// Unlike `materialize_and_flip`, this targets the neighborhood of the soup.
+    fn focused_flip(&mut self, snap: &mut Snap, count: usize) {
         // Materialize Random → Grid if needed
         if let Data::Random { .. } = &snap.data {
             let mut sim_rng =
@@ -594,7 +736,6 @@ impl Laboratory {
             }
         }
 
-        // Flip random cells in the hex-encoded grid
         if let Data::Grid(ref mut lines) = snap.data {
             let height = lines.len();
             if height == 0 {
@@ -606,9 +747,39 @@ impl Laboratory {
             }
             let width = chars_per_line * 4;
 
+            // Find bounding box of alive cells, then flip within an expanded box
+            let (mut minx, mut maxx, mut miny, mut maxy) = (width, 0usize, height, 0usize);
+            for (y, line) in lines.iter().enumerate() {
+                for (ci, ch) in line.chars().enumerate() {
+                    let val = match ch {
+                        '0' => 0,
+                        '1'..='9' => ch as u8 - b'0',
+                        'a'..='f' => 10 + ch as u8 - b'a',
+                        _ => 0,
+                    };
+                    if val > 0 {
+                        minx = minx.min(ci * 4);
+                        maxx = maxx.max(ci * 4 + 3);
+                        miny = miny.min(y);
+                        maxy = maxy.max(y);
+                    }
+                }
+            }
+
+            if minx > maxx {
+                return; // empty grid, nothing to flip near
+            }
+
+            // Expand bounding box by 3 cells in each direction (neighborhood)
+            let pad = 3;
+            let x0 = minx.saturating_sub(pad);
+            let x1 = (maxx + pad).min(width - 1);
+            let y0 = miny.saturating_sub(pad);
+            let y1 = (maxy + pad).min(height - 1);
+
             for _ in 0..count {
-                let x = self.rng.gen_range(0..width);
-                let y = self.rng.gen_range(0..height);
+                let x = self.rng.gen_range(x0..=x1);
+                let y = self.rng.gen_range(y0..=y1);
                 let char_idx = x / 4;
                 let bit_idx = (x % 4) as u32;
                 let ch = lines[y].as_bytes()[char_idx];
@@ -624,11 +795,12 @@ impl Laboratory {
                 } else {
                     b'a' + new_val - 10
                 };
-                // Safety: we're replacing one ASCII byte with another ASCII byte
                 unsafe {
                     lines[y].as_bytes_mut()[char_idx] = new_ch;
                 }
             }
         }
+        snap.random_seed = self.rng.gen();
     }
+
 }
