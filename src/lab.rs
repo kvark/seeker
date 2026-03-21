@@ -289,7 +289,17 @@ impl Laboratory {
                             // Narrative richness = structural events during simulation
                             let narrative_score =
                                 state.narrative.richness().min(100) / 5;
-                            base + var_score + late_score + analysis_score + birth_score + spatial_score + narrative_score
+                            // Transient spaceships = very interesting (gliders, etc.)
+                            let transient_ship_score =
+                                state.transient_spaceships.min(10) * 5;
+                            // High-period oscillators detected anytime
+                            let high_period_score =
+                                if state.max_oscillator_period > 2 {
+                                    state.max_oscillator_period.min(20) * 2
+                                } else {
+                                    0
+                                };
+                            base + var_score + late_score + analysis_score + birth_score + spatial_score + narrative_score + transient_ship_score + high_period_score
                         } else {
                             // Reward sustained birth rate for non-frozen mode too
                             let base = 100 - (60.0 * state.alive_ratio_average) as usize;
@@ -541,11 +551,16 @@ impl Laboratory {
 
         let grid_power = self.rng.gen_range(self.config.size_power.clone());
         let grid_size = 1i32 << grid_power;
-        // Soup size: 8-25 cells on a side (larger soups produce rarer objects)
-        let soup_size = self.rng.gen_range(8..=25);
-        // Methuselahs peak around 37.5% density (Achim Flammenkamp).
-        // Use a range centered there with some exploration.
-        let density: f32 = self.rng.gen_range(0.30..0.45);
+        // Mix of soup strategies:
+        // - Standard census: 16×16 at 50% (what Catagolue uses)
+        // - Methuselah sweet spot: 10-20 cells at 37.5%
+        // - Dense small: 5-10 cells at 50% (good for finding small interesting patterns)
+        let (soup_size, density): (i32, f32) = match self.rng.gen_range(0..10) {
+            0..=3 => (16, 0.50),                                    // 40%: standard census
+            4..=6 => (self.rng.gen_range(10..=20), self.rng.gen_range(0.30..0.45)), // 30%: methuselah
+            7..=8 => (self.rng.gen_range(5..=10), 0.50),            // 20%: dense small
+            _ => (self.rng.gen_range(20..=30), self.rng.gen_range(0.35..0.45)),  // 10%: large sparse
+        };
 
         let mut grid = Grid::new(Coordinates {
             x: grid_size,
