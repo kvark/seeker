@@ -335,6 +335,10 @@ pub struct Statistics {
     pub period: usize,
     /// Step at which periodicity was first detected.
     pub stabilized_step: usize,
+    /// Number of spaceships detected during transient analysis sampling.
+    pub transient_spaceships: usize,
+    /// Highest oscillator period seen during transient or final analysis.
+    pub max_oscillator_period: usize,
 }
 
 pub enum Conclusion {
@@ -457,6 +461,8 @@ impl Simulation {
                 narrative: narrative::NarrativeStats::default(),
                 period: 0,
                 stabilized_step: 0,
+                transient_spaceships: 0,
+                max_oscillator_period: 0,
             },
             hash_seen: FxHashMap::default(),
             candidate_period: None,
@@ -596,6 +602,23 @@ impl Simulation {
         if self.step % narrative::SAMPLE_INTERVAL == 0 && self.stats.period == 0 {
             self.narrative_tracker.sample(grid);
             self.stats.narrative = self.narrative_tracker.stats;
+        }
+
+        // Transient analysis: sample a few times during the active transient phase
+        // to detect spaceships and high-period oscillators that won't survive to stabilization.
+        // Only for deterministic rules (frozen GoL) where analysis is meaningful.
+        if self.rules.deterministic
+            && self.stats.period == 0
+            && self.step >= 500
+            && self.step <= 3000
+            && self.step % 500 == 0
+        {
+            use crate::analysis;
+            let (_patterns, summary) = analysis::analyze_grid(grid);
+            self.stats.transient_spaceships += summary.spaceships.len();
+            for &p in &summary.oscillators {
+                self.stats.max_oscillator_period = self.stats.max_oscillator_period.max(p);
+            }
         }
 
         // Period detection via grid hashing with verification
