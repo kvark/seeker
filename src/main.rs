@@ -68,11 +68,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let active = experiments.len() - concluded;
                 let max_fit = experiments.iter().map(|e| e.fit).max().unwrap_or(0);
                 eprint!(
-                    "\r[{} total, {} active, {} concluded, {} discarded] best fit: {}    ",
+                    "\r[{} total, {} active, {} concluded, {} discarded, map {}/{}] best fit: {}    ",
                     experiments.len(),
                     active,
                     concluded,
                     lab.early_discards,
+                    lab.map_coverage(),
+                    lab.map_capacity(),
                     max_fit
                 );
             }
@@ -111,6 +113,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("- Survivors: {}", survivors.len());
             println!("- Extinct: {}", extinct_count);
             println!("- Saturated: {}", saturate_count);
+            println!(
+                "- MAP-Elites coverage: {}/{} ({:.0}%)",
+                lab.map_coverage(),
+                lab.map_capacity(),
+                100.0 * lab.map_coverage() as f64 / lab.map_capacity() as f64
+            );
             println!();
 
             if !survivors.is_empty() {
