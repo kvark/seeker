@@ -390,7 +390,9 @@ impl Laboratory {
             }
         }
 
-        if current_active < self.config.max_active {
+        // Batch spawning: fill all available slots at once.
+        let slots_to_fill = self.config.max_active.saturating_sub(current_active);
+        for _ in 0..slots_to_fill {
             let parent = if total_fit != 0 {
                 let mut cutoff = self.rng.gen_range(0..total_fit);
                 self.experiments
@@ -409,6 +411,9 @@ impl Laboratory {
                     })
                     .unwrap()
             } else {
+                if self.experiments.is_empty() {
+                    break;
+                }
                 let index = self.rng.gen_range(0..self.experiments.len());
                 &mut self.experiments[index]
             };
@@ -536,9 +541,11 @@ impl Laboratory {
 
         let grid_power = self.rng.gen_range(self.config.size_power.clone());
         let grid_size = 1i32 << grid_power;
-        // Soup size: 8-20 cells on a side
-        let soup_size = self.rng.gen_range(8..=20);
-        let density: f32 = self.rng.gen_range(0.3..0.5);
+        // Soup size: 8-25 cells on a side (larger soups produce rarer objects)
+        let soup_size = self.rng.gen_range(8..=25);
+        // Methuselahs peak around 37.5% density (Achim Flammenkamp).
+        // Use a range centered there with some exploration.
+        let density: f32 = self.rng.gen_range(0.30..0.45);
 
         let mut grid = Grid::new(Coordinates {
             x: grid_size,

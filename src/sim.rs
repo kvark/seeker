@@ -31,16 +31,22 @@ impl Limits {
 #[derive(Debug)]
 struct Rules {
     kernel: FxHashMap<Coordinates, Weight>,
+    /// Pre-compiled kernel offsets for fast iteration (avoids HashMap lookup in hot loop).
+    compiled_kernel: Vec<(Coordinate, Coordinate, Weight)>,
     spawn: Vec<Probability>,
     keep: Vec<Probability>,
+    /// True when all spawn/keep probabilities are exactly 0.0 or 1.0 (no RNG needed).
+    deterministic: bool,
 }
 
 impl Rules {
     fn _new_conways_life() -> Self {
         let mut rules = Self {
             kernel: FxHashMap::default(),
+            compiled_kernel: Vec::new(),
             spawn: vec![0.0; 10],
             keep: vec![0.0; 10],
+            deterministic: false,
         };
         for x in [-1, 0, 1] {
             for y in [-1, 0, 1] {
@@ -52,7 +58,22 @@ impl Rules {
         rules.spawn[3] = 1.0;
         rules.keep[2] = 1.0;
         rules.keep[3] = 1.0;
+        rules.compile();
         rules
+    }
+
+    /// Pre-compile kernel and detect determinism for fast-path simulation.
+    fn compile(&mut self) {
+        self.compiled_kernel = self
+            .kernel
+            .iter()
+            .map(|(off, &w)| (off.x, off.y, w))
+            .collect();
+        self.deterministic = self
+            .spawn
+            .iter()
+            .chain(self.keep.iter())
+            .all(|&p| p == 0.0 || p == 1.0);
     }
 
     fn weight_sum(&self) -> Weight {
@@ -189,8 +210,10 @@ impl HumanRules {
     fn parse(&self) -> Result<Rules, RulesParseError> {
         let mut rules = Rules {
             kernel: FxHashMap::default(),
+            compiled_kernel: Vec::new(),
             spawn: Vec::new(),
             keep: Vec::new(),
+            deterministic: false,
         };
         let center = self
             .kernel
@@ -242,6 +265,7 @@ impl HumanRules {
         if !rules.are_valid() {
             log::error!("Rules {:?} are invalid", rules);
         }
+        rules.compile();
         Ok(rules)
     }
 
@@ -485,53 +509,84 @@ impl Simulation {
         let size = grid.size();
 
         let mut births = 0usize;
-        for y in 0..size.y {
-            for x in 0..size.x {
-                let score = self
-                    .rules
-                    .kernel
-                    .iter()
-                    .map(
-                        |(offsets, &weight)| match prev.get(x + offsets.x, y + offsets.y) {
-                            Some(_) => weight,
-                            None => 0,
-                        },
-                    )
-                    .sum::<Weight>();
-                let coin = (self.rng.next_u32() >> 8) as f32 / (1 << 24) as f32;
-
-                *grid.mutate(x, y) = match prev.get(x, y) {
-                    None if coin < self.rules.spawn[score as usize] => {
-                        births += 1;
-                        let mut avg_breed_age = 0.0;
-                        let mut avg_velocity = [0.0; 2];
-                        for (offsets, &weight) in self.rules.kernel.iter() {
-                            if let Some(cell) = prev.get(x + offsets.x, y + offsets.y) {
-                                let denom = weight as f32 / score as f32;
-                                avg_breed_age +=
-                                    denom * blend(cell.age.get() as f32, cell.avg_breed_age);
-                                avg_velocity[0] +=
-                                    denom * blend(-offsets.x as f32, cell.avg_velocity[0]);
-                                avg_velocity[1] +=
-                                    denom * blend(-offsets.y as f32, cell.avg_velocity[1]);
-                            }
+        if self.rules.deterministic {
+            // Fast path: no RNG needed, use compiled kernel offsets.
+            // For B3/S23 (standard GoL) this avoids all probability math.
+            for y in 0..size.y {
+                for x in 0..size.x {
+                    let mut score = 0u32;
+                    for &(ox, oy, weight) in &self.rules.compiled_kernel {
+                        if prev.get(x + ox, y + oy).is_some() {
+                            score += weight;
                         }
-                        Some(Cell {
-                            age: NonZeroU32::new(1).unwrap(),
-                            avg_breed_age,
-                            avg_velocity,
-                        })
                     }
-                    Some(cell) if coin < self.rules.keep[score as usize] => Some(Cell {
-                        age: NonZeroU32::new(cell.age.get() + 1).unwrap(),
-                        avg_breed_age: cell.avg_breed_age,
-                        avg_velocity: [
-                            blend(0.0, cell.avg_velocity[0]),
-                            blend(0.0, cell.avg_velocity[1]),
-                        ],
-                    }),
-                    _ => None,
-                };
+
+                    *grid.mutate(x, y) = match prev.get(x, y) {
+                        None if self.rules.spawn[score as usize] > 0.5 => {
+                            births += 1;
+                            Some(Cell {
+                                age: NonZeroU32::new(1).unwrap(),
+                                avg_breed_age: 0.0,
+                                avg_velocity: [0.0; 2],
+                            })
+                        }
+                        Some(cell) if self.rules.keep[score as usize] > 0.5 => Some(Cell {
+                            age: NonZeroU32::new(cell.age.get() + 1).unwrap(),
+                            avg_breed_age: cell.avg_breed_age,
+                            avg_velocity: [
+                                blend(0.0, cell.avg_velocity[0]),
+                                blend(0.0, cell.avg_velocity[1]),
+                            ],
+                        }),
+                        _ => None,
+                    };
+                }
+            }
+        } else {
+            // Probabilistic path: use compiled kernel + RNG.
+            for y in 0..size.y {
+                for x in 0..size.x {
+                    let mut score = 0u32;
+                    for &(ox, oy, weight) in &self.rules.compiled_kernel {
+                        if prev.get(x + ox, y + oy).is_some() {
+                            score += weight;
+                        }
+                    }
+                    let coin = (self.rng.next_u32() >> 8) as f32 / (1 << 24) as f32;
+
+                    *grid.mutate(x, y) = match prev.get(x, y) {
+                        None if coin < self.rules.spawn[score as usize] => {
+                            births += 1;
+                            let mut avg_breed_age = 0.0;
+                            let mut avg_velocity = [0.0; 2];
+                            for &(ox, oy, weight) in &self.rules.compiled_kernel {
+                                if let Some(cell) = prev.get(x + ox, y + oy) {
+                                    let denom = weight as f32 / score as f32;
+                                    avg_breed_age +=
+                                        denom * blend(cell.age.get() as f32, cell.avg_breed_age);
+                                    avg_velocity[0] +=
+                                        denom * blend(-ox as f32, cell.avg_velocity[0]);
+                                    avg_velocity[1] +=
+                                        denom * blend(-oy as f32, cell.avg_velocity[1]);
+                                }
+                            }
+                            Some(Cell {
+                                age: NonZeroU32::new(1).unwrap(),
+                                avg_breed_age,
+                                avg_velocity,
+                            })
+                        }
+                        Some(cell) if coin < self.rules.keep[score as usize] => Some(Cell {
+                            age: NonZeroU32::new(cell.age.get() + 1).unwrap(),
+                            avg_breed_age: cell.avg_breed_age,
+                            avg_velocity: [
+                                blend(0.0, cell.avg_velocity[0]),
+                                blend(0.0, cell.avg_velocity[1]),
+                            ],
+                        }),
+                        _ => None,
+                    };
+                }
             }
         }
 
