@@ -271,7 +271,7 @@ impl Laboratory {
                     let mut dummy_rng =
                         <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0);
                     let analysis_score = if let Ok(grid) = snap.data.parse(&mut dummy_rng) {
-                        let (_, summary) = analysis::analyze_grid(&grid);
+                        let (_, summary, _) = analysis::analyze_grid(&grid);
                         let mut score = 0usize;
                         score += summary.unique_patterns.min(20) * 2;
                         score += summary.spaceships.len() * 30;

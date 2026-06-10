@@ -152,6 +152,25 @@ fn gol_step(grid: &Grid) -> Grid {
     next
 }
 
+/// Compute a position-independent hash of a component given as a slice of coordinates.
+/// The hash depends only on the relative arrangement of cells, not absolute position.
+pub fn component_shape_hash(cells: &[Coordinates]) -> u64 {
+    if cells.is_empty() {
+        return 0;
+    }
+    let minx = cells.iter().map(|c| c.x).min().unwrap();
+    let miny = cells.iter().map(|c| c.y).min().unwrap();
+
+    let mut sorted: Vec<_> = cells.iter().map(|c| (c.x - minx, c.y - miny)).collect();
+    sorted.sort();
+
+    let mut hasher = rustc_hash::FxHasher::default();
+    for pos in &sorted {
+        pos.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Compute a position-independent hash of alive cells.
 fn normalized_hash(grid: &Grid) -> u64 {
     let size = grid.size();
@@ -273,7 +292,7 @@ fn name_pattern(_hash: u64, class: &PatternClass) -> Option<&'static str> {
         PatternClass::StillLife { cells: 8 } => Some("pond/long-ship"),
         PatternClass::Oscillator { period: 2, cells: 3 } => Some("blinker"),
         PatternClass::Oscillator { period: 2, cells: 6 } => Some("toad/beacon"),
-        PatternClass::Oscillator { period: 3, cells: 12 } => Some("pulsar"),
+        PatternClass::Oscillator { period: 3, cells: 48 } => Some("pulsar"),
         PatternClass::Oscillator { period: 15, cells: 12 } => Some("pentadecathlon"),
         PatternClass::Spaceship { period: 4, cells: 5 } => Some("glider"),
         PatternClass::Spaceship { period: 4, cells: 9 } => Some("LWSS"),
@@ -314,9 +333,92 @@ fn bbox_chebyshev_distance(
     dx.max(dy)
 }
 
-/// Analyze a grid: extract components and classify each.
-pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary) {
-    let components = connected_components(grid);
+/// Merge connected components into constellations.
+///
+/// Components whose bounding boxes have Chebyshev distance < 2 are merged,
+/// since they are within the Moore neighborhood interaction range.  This allows
+/// multi-component patterns like pulsars (48 cells, period 3) to be classified
+/// as a single unit — matching how apgsearch handles "pseudo-objects".
+///
+/// Returns a list of merged cell groups (constellations).
+fn merge_constellations(components: &[Vec<Coordinates>]) -> Vec<Vec<Coordinates>> {
+    let n = components.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Compute bounding boxes
+    let bboxes: Vec<_> = components.iter().map(|c| bounding_box(c)).collect();
+
+    // Union-Find
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut rank = vec![0u8; n];
+
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]]; // path compression
+            i = parent[i];
+        }
+        i
+    }
+
+    fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra == rb {
+            return;
+        }
+        if rank[ra] < rank[rb] {
+            parent[ra] = rb;
+        } else if rank[ra] > rank[rb] {
+            parent[rb] = ra;
+        } else {
+            parent[rb] = ra;
+            rank[ra] += 1;
+        }
+    }
+
+    // Merge components with Chebyshev distance < 2 between bounding boxes
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if bbox_chebyshev_distance(bboxes[i], bboxes[j]) < 2 {
+                union(&mut parent, &mut rank, i, j);
+            }
+        }
+    }
+
+    // Group components by their root
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> =
+        std::collections::HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+
+    // Build merged cell lists, preserving a stable ordering (by smallest component index)
+    let mut roots: Vec<usize> = groups.keys().copied().collect();
+    roots.sort();
+
+    let mut merged = Vec::with_capacity(roots.len());
+    for root in roots {
+        let indices = &groups[&root];
+        let mut cells = Vec::new();
+        for &idx in indices {
+            cells.extend_from_slice(&components[idx]);
+        }
+        merged.push(cells);
+    }
+    merged
+}
+
+/// Analyze a grid: extract components, merge nearby ones into constellations,
+/// and classify each constellation.
+pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary, Vec<Vec<Coordinates>>) {
+    let raw_components = connected_components(grid);
+
+    // Merge nearby components into constellations for classification.
+    let components = merge_constellations(&raw_components);
+
     let mut patterns = Vec::with_capacity(components.len());
     let mut summary = AnalysisSummary::default();
     let mut pattern_hashes = std::collections::HashSet::new();
@@ -336,8 +438,10 @@ pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary) {
         let minx = comp.iter().map(|c| c.x).min().unwrap();
         let miny = comp.iter().map(|c| c.y).min().unwrap();
         let mut hasher = rustc_hash::FxHasher::default();
-        for c in comp {
-            (c.x - minx, c.y - miny).hash(&mut hasher);
+        let mut sorted_positions: Vec<_> = comp.iter().map(|c| (c.x - minx, c.y - miny)).collect();
+        sorted_positions.sort();
+        for pos in &sorted_positions {
+            pos.hash(&mut hasher);
         }
         let hash = hasher.finish();
         pattern_hashes.insert(hash);
@@ -382,6 +486,8 @@ pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary) {
 
     // Check independence: all classified components separated by >= 2 cells
     // (Chebyshev distance >= 2, which is the constellation criterion for Moore neighborhood).
+    // Note: merged constellations are already single entries, so internal components
+    // (which were merged because they were close) don't affect this check.
     summary.components_independent = if classified_bboxes.len() > 1 {
         let mut independent = true;
         'outer: for i in 0..classified_bboxes.len() {
@@ -397,5 +503,5 @@ pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary) {
         true
     };
 
-    (patterns, summary)
+    (patterns, summary, components)
 }
