@@ -77,6 +77,19 @@ struct EliteEntry {
     id: usize,
 }
 
+/// GPU pre-screening of candidates before they become CPU experiments.
+/// Stage 1 of the multi-fidelity funnel: cheap level-1/2 signals on GPU,
+/// full level-3/6 instrumentation on CPU for the best scorers only.
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+pub struct GpuScreenConfig {
+    /// CA steps to simulate per candidate during screening.
+    pub steps: usize,
+    /// Stats readback interval in steps.
+    pub interval: usize,
+    /// Candidates per screening batch.
+    pub batch: usize,
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Configuration {
     max_active: usize,
@@ -88,6 +101,10 @@ pub struct Configuration {
     /// When true, rules are locked and only initial conditions are mutated.
     #[serde(default)]
     pub frozen_rules: bool,
+    /// GPU candidate screening (requires the "gpu" feature and frozen rules;
+    /// ignored otherwise).
+    #[serde(default)]
+    pub gpu_screen: Option<GpuScreenConfig>,
 }
 
 pub struct Experiment {
@@ -135,6 +152,15 @@ pub struct Laboratory {
     pub early_discards: usize,
     /// Total concluded experiments (for random injection scheduling).
     total_concluded: usize,
+    /// GPU candidate screener (multi-fidelity funnel stage 1).
+    #[cfg(feature = "gpu")]
+    screener: Option<screen::Screener>,
+    /// Screened candidates awaiting promotion to CPU experiments,
+    /// sorted ascending by score (pop() returns the best).
+    #[cfg(feature = "gpu")]
+    screened_queue: Vec<screen::Screened>,
+    /// Candidates discarded by GPU screening so far.
+    pub screen_discards: usize,
 }
 
 impl Laboratory {
@@ -155,6 +181,12 @@ impl Laboratory {
             workers.push(choir.add_worker(&format!("w{}", i)));
         }
         let (sender_origin, receiver) = crossbeam_channel::bounded(CHANNEL_BOUND);
+        // GPU screening only makes sense with frozen rules: the shader is B3/S23.
+        #[cfg(feature = "gpu")]
+        let screener = config
+            .gpu_screen
+            .filter(|_| config.frozen_rules)
+            .map(screen::Screener::new);
         Self {
             config,
             rng: ThreadRng::default(),
@@ -169,6 +201,11 @@ impl Laboratory {
             elite_map: HashMap::new(),
             early_discards: 0,
             total_concluded: 0,
+            #[cfg(feature = "gpu")]
+            screener,
+            #[cfg(feature = "gpu")]
+            screened_queue: Vec::new(),
+            screen_discards: 0,
         }
     }
 
@@ -451,7 +488,17 @@ impl Laboratory {
             .count();
 
         // Batch spawning: fill all available slots
-        let slots_to_fill = self.config.max_active.saturating_sub(current_active);
+        #[allow(unused_mut)]
+        let mut slots_to_fill = self.config.max_active.saturating_sub(current_active);
+
+        // GPU funnel: promote screened candidates first. Any slots it can't
+        // fill (screener still busy) fall through to direct spawning below,
+        // so a slow GPU never starves the CPU workers.
+        #[cfg(feature = "gpu")]
+        if self.screener.is_some() {
+            slots_to_fill = self.spawn_screened(slots_to_fill);
+        }
+
         for _ in 0..slots_to_fill {
             // Every 10th experiment: random injection (not from any parent)
             let use_random = self.total_concluded > 0 && self.rng.gen_range(0..10) == 0;
@@ -467,6 +514,77 @@ impl Laboratory {
                 self.add_experiment(snap, parent_id);
             }
         }
+    }
+
+    /// Fill experiment slots through the GPU screening funnel: promote the
+    /// best already-screened candidates, and keep the screener fed with
+    /// fresh batches of mutated candidates. Returns the number of slots
+    /// it could not fill.
+    #[cfg(feature = "gpu")]
+    fn spawn_screened(&mut self, slots_to_fill: usize) -> usize {
+        // Drain finished screening batches into the queue.
+        let mut fresh = Vec::new();
+        {
+            let screener = self.screener.as_mut().unwrap();
+            while let Ok(results) = screener.receiver.try_recv() {
+                screener.in_flight -= 1;
+                fresh.extend(results);
+            }
+        }
+        if !fresh.is_empty() {
+            let before = fresh.len();
+            fresh.retain(|c| c.score > 0.0);
+            self.screen_discards += before - fresh.len();
+            writeln!(
+                self.log,
+                "Screened batch: {} kept, {} discarded",
+                fresh.len(),
+                before - fresh.len()
+            )
+            .unwrap();
+            self.screened_queue.extend(fresh);
+            self.screened_queue
+                .sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+        }
+
+        // Promote the best screened candidates to CPU experiments.
+        let mut unfilled = slots_to_fill;
+        while unfilled > 0 {
+            match self.screened_queue.pop() {
+                Some(candidate) => {
+                    self.add_experiment(candidate.snap, candidate.parent_id);
+                    unfilled -= 1;
+                }
+                None => break,
+            }
+        }
+
+        // Keep the screener busy whenever the queue is running low.
+        let batch_size = self.config.gpu_screen.unwrap().batch;
+        let screener_idle = self.screener.as_ref().unwrap().in_flight == 0;
+        if screener_idle && self.screened_queue.len() < batch_size {
+            let mut batch = Vec::with_capacity(batch_size);
+            for _ in 0..batch_size {
+                let use_random = self.total_concluded > 0 && self.rng.gen_range(0..10) == 0;
+                if use_random || self.elite_map.is_empty() {
+                    if let Some(mut snap) = self.experiments.first().map(|e| e.snap.clone()) {
+                        self.create_soup(&mut snap);
+                        batch.push(screen::Candidate { snap, parent_id: 0 });
+                    }
+                } else if let Some((mut snap, parent_id)) = self.select_parent() {
+                    self.mutate_snap(&mut snap);
+                    batch.push(screen::Candidate { snap, parent_id });
+                }
+            }
+            if !batch.is_empty() {
+                let screener = self.screener.as_mut().unwrap();
+                if screener.sender.send(batch).is_ok() {
+                    screener.in_flight += 1;
+                }
+            }
+        }
+
+        unfilled
     }
 
     fn mutate_probabilities(&mut self, probabilities: &mut ProbabilityTable) {
@@ -803,4 +921,114 @@ impl Laboratory {
         snap.random_seed = self.rng.gen();
     }
 
+}
+
+/// GPU candidate screening: a dedicated thread owning `GpuSimulator`
+/// instances (one per grid size + boundary combination), fed batches of
+/// candidate snaps and returning cheap interestingness scores.
+#[cfg(feature = "gpu")]
+mod screen {
+    use super::GpuScreenConfig;
+    use crate::gpu::{pack_grid, GpuBatchConfig, GpuSimulator};
+    use crate::grid::BoundaryMode;
+    use crate::sim::Snap;
+    use std::collections::HashMap;
+
+    /// A mutated snap awaiting GPU screening.
+    pub struct Candidate {
+        pub snap: Snap,
+        pub parent_id: usize,
+    }
+
+    /// A screened candidate; score 0.0 means the GPU saw it die or saturate.
+    pub struct Screened {
+        pub snap: Snap,
+        pub parent_id: usize,
+        pub score: f32,
+    }
+
+    pub struct Screener {
+        pub sender: crossbeam_channel::Sender<Vec<Candidate>>,
+        pub receiver: crossbeam_channel::Receiver<Vec<Screened>>,
+        /// Number of batches sent but not yet received back.
+        pub in_flight: usize,
+    }
+
+    impl Screener {
+        pub fn new(config: GpuScreenConfig) -> Self {
+            let (sender, candidate_rx) = crossbeam_channel::unbounded::<Vec<Candidate>>();
+            let (result_tx, receiver) = crossbeam_channel::unbounded();
+            // The thread exits when the Laboratory (and thus `sender`) drops.
+            std::thread::spawn(move || {
+                let mut simulators: HashMap<(i32, i32, BoundaryMode), GpuSimulator> =
+                    HashMap::new();
+                while let Ok(batch) = candidate_rx.recv() {
+                    let results = screen_batch(&mut simulators, &config, batch);
+                    if result_tx.send(results).is_err() {
+                        return;
+                    }
+                }
+            });
+            Self {
+                sender,
+                receiver,
+                in_flight: 0,
+            }
+        }
+    }
+
+    fn screen_batch(
+        simulators: &mut HashMap<(i32, i32, BoundaryMode), GpuSimulator>,
+        config: &GpuScreenConfig,
+        batch: Vec<Candidate>,
+    ) -> Vec<Screened> {
+        // Group candidates by grid dimensions + boundary: each GPU batch
+        // must share them.
+        let mut groups: HashMap<(i32, i32, BoundaryMode), Vec<(Candidate, Vec<u32>)>> =
+            HashMap::new();
+        for candidate in batch {
+            let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(
+                candidate.snap.random_seed,
+            );
+            let grid = match candidate.snap.data.parse(&mut rng) {
+                Ok(grid) => grid,
+                Err(_) => continue,
+            };
+            let size = grid.size();
+            let packed = pack_grid(&grid);
+            groups
+                .entry((size.x, size.y, candidate.snap.boundary))
+                .or_default()
+                .push((candidate, packed));
+        }
+
+        let mut results = Vec::new();
+        for ((width, height, boundary), mut members) in groups {
+            let simulator = simulators
+                .entry((width, height, boundary))
+                .or_insert_with(|| {
+                    GpuSimulator::new(GpuBatchConfig {
+                        grid_width: width as u32,
+                        grid_height: height as u32,
+                        steps_per_batch: config.interval as u32,
+                        num_grids: config.batch as u32,
+                        boundary,
+                    })
+                });
+            while !members.is_empty() {
+                let take = members.len().min(config.batch);
+                let chunk: Vec<_> = members.drain(..take).collect();
+                let packed: Vec<Vec<u32>> = chunk.iter().map(|(_, p)| p.clone()).collect();
+                let outcomes = simulator.screen(&packed, config.steps, config.interval);
+                for ((candidate, _), outcome) in chunk.into_iter().zip(outcomes) {
+                    results.push(Screened {
+                        snap: candidate.snap,
+                        parent_id: candidate.parent_id,
+                        score: outcome.score,
+                    });
+                }
+            }
+        }
+        results
+    }
 }
