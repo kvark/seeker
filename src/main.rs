@@ -68,11 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let active = experiments.len() - concluded;
                 let max_fit = experiments.iter().map(|e| e.fit).max().unwrap_or(0);
                 eprint!(
-                    "\r[{} total, {} active, {} concluded, {} discarded, map {}/{}] best fit: {}    ",
+                    "\r[{} total, {} active, {} concluded, {} discarded, {} screened-out, map {}/{}] best fit: {}    ",
                     experiments.len(),
                     active,
                     concluded,
                     lab.early_discards,
+                    lab.screen_discards,
                     lab.map_coverage(),
                     lab.map_capacity(),
                     max_fit

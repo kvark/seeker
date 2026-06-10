@@ -145,12 +145,11 @@ track classified-cell coverage and component independence.
    rather than sample occurrences.
 
 ### Known remaining issues
-- GPU path is not integrated with Laboratory (island module)
-- GPU submits+waits once per CA step (should batch K steps per submission)
-- Shader always wraps (ignores Dead boundary mode)
 - `avg_velocity` cell field computed but unused — 16 bytes/cell overhead
-- Narrative matching uses centroid distance with permissive threshold; cell-overlap
-  identity would be more accurate for detecting splits/merges
+- Screener thread creates one blade Context per (size, boundary) combination;
+  should share a single Context across GpuSimulators
+- GPU screening uses fixed steps per candidate; no GPU-side early discard yet
+  (Phase 3)
 
 ### Previously fixed (from original analysis)
 - ~~Fitness function is coarse~~ → composite fitness with level 2-6 signals
@@ -168,14 +167,19 @@ track classified-cell coverage and component independence.
 - Tests pass on lavapipe (blinker oscillation, pack/unpack roundtrip)
 - `GpuSimulator::new` is infallible (panics on failure — shaders must work)
 
-### Remaining work
+### Phase 1: Complete
+- `step(K)` encodes all K steps in one submission, GPU-side buffer clears,
+  single sync at batch end
+- Shader honors `BoundaryMode::Dead` via `boundary_mode` uniform
+- `matches_cpu_simulation` test: GPU output is bit-identical to CPU
+  `Simulation` for both boundary modes
+- Multi-fidelity funnel wired into `Laboratory`: `gpu_screen` config spawns
+  a screener thread that scores candidate batches (level-1/2 signals);
+  only the best become CPU experiments. Slots the screener can't fill fall
+  back to direct spawning, so a slow GPU (lavapipe) never starves the search.
+  See `data/hunt-gpu.ron`.
 
-**Integration (Phase 1 completion)**:
-- Wire `GpuSimulator` into `Laboratory` as a batch backend
-- Batch K steps per GPU submission (currently syncs per step — latency bound)
-- Honor `BoundaryMode::Dead` in shader (currently always wraps)
-- Multi-fidelity funnel: GPU for fast screening → CPU `Simulation` for top
-  candidates needing narrative/analysis
+### Remaining work
 
 **Phase 2: Probabilistic rules on GPU**:
 - Table-driven spawn/keep (upload probability tables as uniform buffer)
@@ -225,8 +229,8 @@ CPU (lab.rs)                          GPU (blade compute)
 4. Deduplicate transient ship counting (trajectory hash)
 
 ### Phase B: Complete GPU integration
-1. Batch K steps per submission, add Dead boundary support
-2. Multi-fidelity funnel: GPU screening → CPU detailed analysis
+1. ~~Batch K steps per submission, add Dead boundary support~~ done
+2. ~~Multi-fidelity funnel: GPU screening → CPU detailed analysis~~ done
 3. Table-driven rules + Philox RNG in shader (Phase 2)
 
 ### Phase C: Rule-space exploration

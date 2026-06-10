@@ -3,7 +3,7 @@
 //! Simulates thousands of CA grids simultaneously on GPU via compute shaders.
 //! Selection, mutation, and fitness evaluation remain on CPU.
 
-use blade_graphics::{traits::TransferEncoder as _, ShaderData as _};
+use blade_graphics::ShaderData as _;
 use crate::grid::{BoundaryMode, Coordinates, Grid};
 
 /// Per-grid statistics read back from GPU.
@@ -36,6 +36,46 @@ impl GridStats {
             .collect();
         let mean: f32 = densities.iter().sum::<f32>() / 16.0;
         densities.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / 16.0
+    }
+}
+
+/// Outcome of screening one grid: cheap level-1/2 signals from stats history.
+#[derive(Clone, Debug, Default)]
+pub struct ScreenOutcome {
+    /// Relative interestingness; 0.0 means discard (extinct or saturated).
+    pub score: f32,
+    pub final_alive_ratio: f32,
+}
+
+/// Score a grid's stats history. Rewards alive-ratio dynamism, spatial
+/// structure, and sustained births — the same signals the CPU fitness uses,
+/// computed from stats alone.
+fn score_history(history: &[GridStats], total_cells: u32) -> ScreenOutcome {
+    let last = match history.last() {
+        Some(stats) => stats,
+        None => return ScreenOutcome::default(),
+    };
+    if last.alive_count == 0 {
+        return ScreenOutcome::default();
+    }
+    let final_alive_ratio = last.alive_ratio(total_cells);
+    if final_alive_ratio > 0.9 {
+        return ScreenOutcome::default();
+    }
+    let ratios: Vec<f32> = history
+        .iter()
+        .map(|s| s.alive_ratio(total_cells))
+        .collect();
+    let mean = ratios.iter().sum::<f32>() / ratios.len() as f32;
+    let variance =
+        ratios.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / ratios.len() as f32;
+    let score = 1.0
+        + (variance * 1.0e6).min(50.0)
+        + (last.spatial_variance(total_cells) * 1.0e4).min(20.0)
+        + (last.birth_rate(total_cells) * 1.0e4).min(30.0);
+    ScreenOutcome {
+        score,
+        final_alive_ratio,
     }
 }
 
@@ -311,6 +351,37 @@ impl GpuSimulator {
         self.sync_point = Some(sp);
     }
 
+    /// Screen a batch of packed grids: run `total_steps`, reading stats back
+    /// every `interval` steps, and produce a cheap interestingness score per
+    /// grid. This is the fast level-1/2 filter of the multi-fidelity funnel;
+    /// survivors should be re-simulated on CPU for full instrumentation.
+    pub fn screen(
+        &mut self,
+        packed: &[Vec<u32>],
+        total_steps: usize,
+        interval: usize,
+    ) -> Vec<ScreenOutcome> {
+        let count = packed.len();
+        self.upload_grids(packed);
+        let total_cells = self.config.total_cells();
+        let interval = interval.max(1);
+        let mut histories: Vec<Vec<GridStats>> = vec![Vec::new(); count];
+        let mut done = 0usize;
+        while done < total_steps {
+            let n = interval.min(total_steps - done);
+            self.step(n);
+            let stats = self.readback_stats();
+            for (history, stat) in histories.iter_mut().zip(stats.into_iter()) {
+                history.push(stat);
+            }
+            done += n;
+        }
+        histories
+            .iter()
+            .map(|h| score_history(h, total_cells))
+            .collect()
+    }
+
     /// Read back per-grid statistics from GPU.
     pub fn readback_stats(&self) -> Vec<GridStats> {
         let n = self.config.num_grids as usize;
@@ -405,6 +476,46 @@ mod tests {
         assert!(unpacked.get(10, 10).is_some());
         assert!(unpacked.get(0, 0).is_some());
         assert!(unpacked.get(1, 1).is_none());
+    }
+
+    /// Screening must discard dead grids and rank an active methuselah
+    /// above a static oscillator.
+    #[test]
+    fn screen_ranks_candidates() {
+        const W: i32 = 32;
+        const H: i32 = 32;
+        let mut sim = GpuSimulator::new(GpuBatchConfig {
+            grid_width: W as u32,
+            grid_height: H as u32,
+            steps_per_batch: 16,
+            num_grids: 3,
+            boundary: BoundaryMode::Wrap,
+        });
+
+        let empty = Grid::new(Coordinates { x: W, y: H });
+        let mut blinker = Grid::new(Coordinates { x: W, y: H });
+        for x in 14..17 {
+            blinker.init(x, 16);
+        }
+        // R-pentomino: an active methuselah
+        let mut rpent = Grid::new(Coordinates { x: W, y: H });
+        for &(x, y) in &[(16, 15), (17, 15), (15, 16), (16, 16), (16, 17)] {
+            rpent.init(x, y);
+        }
+
+        let outcomes = sim.screen(
+            &[pack_grid(&empty), pack_grid(&blinker), pack_grid(&rpent)],
+            64,
+            16,
+        );
+        assert_eq!(outcomes[0].score, 0.0, "empty grid must be discarded");
+        assert!(outcomes[1].score > 0.0, "blinker survives");
+        assert!(
+            outcomes[2].score > outcomes[1].score,
+            "active methuselah ({}) should outrank static blinker ({})",
+            outcomes[2].score,
+            outcomes[1].score
+        );
     }
 
     /// The GPU path must produce bit-identical results to the CPU

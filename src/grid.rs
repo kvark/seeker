@@ -9,7 +9,7 @@ pub struct Coordinates {
 }
 
 /// How the grid handles out-of-bounds coordinates.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BoundaryMode {
     /// Toroidal wrapping — coordinates wrap around edges.
     #[default]
