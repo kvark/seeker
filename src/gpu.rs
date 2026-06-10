@@ -3,7 +3,7 @@
 //! Simulates thousands of CA grids simultaneously on GPU via compute shaders.
 //! Selection, mutation, and fitness evaluation remain on CPU.
 
-use blade_graphics::ShaderData as _;
+use blade_graphics::{traits::TransferEncoder as _, ShaderData as _};
 use crate::grid::{BoundaryMode, Coordinates, Grid};
 
 /// Per-grid statistics read back from GPU.
@@ -81,6 +81,8 @@ pub struct GpuBatchConfig {
     pub steps_per_batch: u32,
     /// How many grids to simulate in parallel.
     pub num_grids: u32,
+    /// Boundary mode shared by all grids in the batch.
+    pub boundary: BoundaryMode,
 }
 
 impl GpuBatchConfig {
@@ -104,6 +106,7 @@ struct SimParams {
     grid_height: u32,
     words_per_grid: u32,
     num_grids: u32,
+    boundary_mode: u32,
 }
 
 /// Shader data layout matching the WGSL globals.
@@ -230,36 +233,44 @@ impl GpuSimulator {
         }
     }
 
-    fn zero_stats(&self) {
-        let n = self.config.num_grids as usize;
-        unsafe {
-            std::slice::from_raw_parts_mut(self.alive_counts_buf.data() as *mut u32, n).fill(0);
-            std::slice::from_raw_parts_mut(self.birth_counts_buf.data() as *mut u32, n).fill(0);
-            std::slice::from_raw_parts_mut(self.region_alive_buf.data() as *mut u32, n * 16)
-                .fill(0);
-        }
+    /// Read back the current (most recently computed) state of all grids.
+    pub fn readback_grids(&self) -> Vec<Vec<u32>> {
+        let words_per_grid = self.config.words_per_grid();
+        // After step(), `ping` points at the buffer holding the latest state
+        // (the next step's source).
+        let src = if self.ping { self.grids_b } else { self.grids_a };
+        let total_words = words_per_grid * self.config.num_grids as usize;
+        let buf =
+            unsafe { std::slice::from_raw_parts(src.data() as *const u32, total_words) };
+        (0..self.config.num_grids as usize)
+            .map(|i| buf[i * words_per_grid..(i + 1) * words_per_grid].to_vec())
+            .collect()
     }
 
-    fn zero_grid(&self, buf: blade_graphics::Buffer) {
-        let total_words = self.config.words_per_grid() * self.config.num_grids as usize;
-        unsafe {
-            std::slice::from_raw_parts_mut(buf.data() as *mut u32, total_words).fill(0);
-        }
-    }
-
-    /// Run `count` CA steps on all grids, then wait for completion.
+    /// Run `count` CA steps on all grids in a single GPU submission,
+    /// then wait for completion. Stats reflect the final step only.
+    ///
+    /// Buffers are cleared GPU-side between steps (blade inserts a full
+    /// barrier before every pass), so no CPU sync is needed mid-batch.
     pub fn step(&mut self, count: usize) {
         let cells_per_grid = self.config.total_cells();
         let workgroup_size = 256u32;
         let workgroups_x = (cells_per_grid + workgroup_size - 1) / workgroup_size;
+        let n = self.config.num_grids as u64;
+        let grid_bytes = (self.config.words_per_grid() * self.config.num_grids as usize * 4) as u64;
 
         let params = SimParams {
             grid_width: self.config.grid_width,
             grid_height: self.config.grid_height,
             words_per_grid: self.config.words_per_grid() as u32,
             num_grids: self.config.num_grids,
+            boundary_mode: match self.config.boundary {
+                BoundaryMode::Wrap => 0,
+                BoundaryMode::Dead => 1,
+            },
         };
 
+        self.encoder.start();
         for _ in 0..count {
             let (src, dst) = if self.ping {
                 (self.grids_b, self.grids_a)
@@ -267,11 +278,16 @@ impl GpuSimulator {
                 (self.grids_a, self.grids_b)
             };
 
-            // Zero destination grid and stats
-            self.zero_grid(dst);
-            self.zero_stats();
-
-            self.encoder.start();
+            // Clear destination grid and stats on GPU.
+            // The shader only ORs bits in and accumulates stats, so both
+            // must start at zero each step.
+            {
+                let mut transfer = self.encoder.transfer("clear");
+                transfer.fill_buffer(dst.into(), grid_bytes, 0);
+                transfer.fill_buffer(self.alive_counts_buf.into(), n * 4, 0);
+                transfer.fill_buffer(self.birth_counts_buf.into(), n * 4, 0);
+                transfer.fill_buffer(self.region_alive_buf.into(), n * 16 * 4, 0);
+            }
             {
                 let mut pass = self.encoder.compute("ca_step");
                 let mut pc = pass.with(&self.pipeline);
@@ -288,11 +304,11 @@ impl GpuSimulator {
                 );
                 pc.dispatch([workgroups_x, self.config.num_grids, 1]);
             }
-            let sp = self.context.submit(&mut self.encoder);
-            self.context.wait_for(&sp, !0);
-            self.sync_point = Some(sp);
             self.ping = !self.ping;
         }
+        let sp = self.context.submit(&mut self.encoder);
+        self.context.wait_for(&sp, !0);
+        self.sync_point = Some(sp);
     }
 
     /// Read back per-grid statistics from GPU.
@@ -349,6 +365,7 @@ mod tests {
             grid_height: h,
             steps_per_batch: 1,
             num_grids: 1,
+            boundary: BoundaryMode::Wrap,
         });
 
         // Pack a blinker: cells (2,3), (3,3), (4,3).
@@ -388,5 +405,78 @@ mod tests {
         assert!(unpacked.get(10, 10).is_some());
         assert!(unpacked.get(0, 0).is_some());
         assert!(unpacked.get(1, 1).is_none());
+    }
+
+    /// The GPU path must produce bit-identical results to the CPU
+    /// `Simulation` for both boundary modes. The test soup deliberately
+    /// touches the grid edges so wrap-vs-dead actually changes the outcome.
+    #[test]
+    fn matches_cpu_simulation() {
+        use crate::sim::{Data, HumanRules, Limits, Simulation, Snap};
+
+        const W: i32 = 32;
+        const H: i32 = 32;
+        const STEPS: usize = 16;
+
+        for boundary in [BoundaryMode::Wrap, BoundaryMode::Dead] {
+            // Deterministic pseudo-random soup, including edge cells.
+            let mut grid = Grid::with_boundary(Coordinates { x: W, y: H }, boundary);
+            let mut state = 0x2545F4914F6CDD1Du64;
+            for _ in 0..300 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let x = ((state >> 33) % W as u64) as i32;
+                let y = ((state >> 13) % H as u64) as i32;
+                grid.init(x, y);
+            }
+            for &(x, y) in &[(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1), (0, 15), (W - 1, 16), (15, 0), (16, H - 1)] {
+                grid.init(x, y);
+            }
+            let initial = pack_grid(&grid);
+
+            // CPU reference: the production Simulation path (B3/S23).
+            let mut rules = HumanRules {
+                kernel: vec!["111".into(), "1X1".into(), "111".into()],
+                ..Default::default()
+            };
+            rules.spawn.insert(3, 1.0);
+            rules.keep.insert(2, 1.0);
+            rules.keep.insert(3, 1.0);
+            let snap = Snap {
+                data: Data::unparse(&grid),
+                rules,
+                random_seed: 0,
+                limits: Limits {
+                    max_steps: 100_000,
+                    update_weight: 0.1,
+                },
+                boundary,
+            };
+            let mut sim = Simulation::new(&snap).unwrap();
+            for _ in 0..STEPS {
+                sim.advance().unwrap_or_else(|c| {
+                    panic!("CPU sim concluded early ({}) with boundary {:?}", c, boundary)
+                });
+            }
+
+            // GPU path.
+            let mut gpu = GpuSimulator::new(GpuBatchConfig {
+                grid_width: W as u32,
+                grid_height: H as u32,
+                steps_per_batch: STEPS as u32,
+                num_grids: 1,
+                boundary,
+            });
+            gpu.upload_grids(&[initial]);
+            gpu.step(STEPS);
+            let gpu_grids = gpu.readback_grids();
+
+            assert_eq!(
+                gpu_grids[0],
+                pack_grid(sim.grid()),
+                "GPU and CPU diverged after {} steps with boundary {:?}",
+                STEPS,
+                boundary
+            );
+        }
     }
 }
