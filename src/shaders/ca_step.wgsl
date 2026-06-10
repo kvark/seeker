@@ -11,6 +11,8 @@ struct SimParams {
     grid_height: u32,
     words_per_grid: u32,
     num_grids: u32,
+    // 0 = toroidal wrap, 1 = dead boundary (out-of-bounds cells are empty)
+    boundary_mode: u32,
 }
 
 var<uniform> params: SimParams;
@@ -45,16 +47,26 @@ fn ca_step(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let base = grid_idx * params.words_per_grid;
 
-    // Count Moore neighborhood (8 neighbors, toroidal wrap)
+    // Count Moore neighborhood (8 neighbors), honoring the boundary mode
+    let width = i32(params.grid_width);
+    let height = i32(params.grid_height);
     var count: u32 = 0u;
     for (var dy: i32 = -1; dy <= 1; dy++) {
         for (var dx: i32 = -1; dx <= 1; dx++) {
             if dx == 0 && dy == 0 {
                 continue;
             }
-            let nx = u32((i32(x) + dx + i32(params.grid_width)) % i32(params.grid_width));
-            let ny = u32((i32(y) + dy + i32(params.grid_height)) % i32(params.grid_height));
-            let ni = ny * params.grid_width + nx;
+            var nx = i32(x) + dx;
+            var ny = i32(y) + dy;
+            if params.boundary_mode == 1u {
+                if nx < 0 || nx >= width || ny < 0 || ny >= height {
+                    continue;
+                }
+            } else {
+                nx = (nx + width) % width;
+                ny = (ny + height) % height;
+            }
+            let ni = u32(ny) * params.grid_width + u32(nx);
             count += get_bit(base, ni);
         }
     }
