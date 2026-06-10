@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Err(_) => break,
                                 }
                             }
-                            let (_patterns, summary) = analysis::analyze_grid(sim.grid());
+                            let (_patterns, summary, _) = analysis::analyze_grid(sim.grid());
                             print!("- E[{}]: {}", exp.id, summary);
                             // Highlight interesting finds
                             if !summary.spaceships.is_empty() {

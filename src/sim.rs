@@ -1,5 +1,6 @@
 use rand::{Rng as _, RngCore};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::hash::{Hash, Hasher};
 use std::{fmt, num::NonZeroU32};
 
 use crate::grid::{BoundaryMode, Cell, Coordinate, Coordinates, Grid, GridAnalysis};
@@ -313,7 +314,7 @@ pub struct Snap {
     pub data: Data,
     pub rules: HumanRules,
     pub random_seed: u64,
-    limits: Limits,
+    pub limits: Limits,
     /// Boundary mode for the grid. Defaults to Wrap for backwards compatibility.
     #[serde(default)]
     pub boundary: BoundaryMode,
@@ -415,6 +416,10 @@ pub struct Simulation {
     candidate_period: Option<(usize, u64, usize)>,
     /// Narrative event tracker (component diffing).
     narrative_tracker: narrative::NarrativeTracker,
+    /// Hashes of unique spaceships seen during transient analysis.
+    /// Each hash encodes the ship's normalized shape + coarse grid quadrant,
+    /// so the same glider observed at different sample steps isn't double-counted.
+    seen_ships: FxHashSet<u64>,
 }
 
 #[derive(Debug)]
@@ -467,6 +472,7 @@ impl Simulation {
             hash_seen: FxHashMap::default(),
             candidate_period: None,
             narrative_tracker: narrative::NarrativeTracker::new(),
+            seen_ships: FxHashSet::default(),
         })
     }
 
@@ -613,9 +619,32 @@ impl Simulation {
             && self.step <= 3000
             && self.step % 500 == 0
         {
-            use crate::analysis;
-            let (_patterns, summary) = analysis::analyze_grid(grid);
-            self.stats.transient_spaceships += summary.spaceships.len();
+            use crate::analysis::{self, PatternClass};
+            let (patterns, summary, components) = analysis::analyze_grid(grid);
+            // Deduplicate spaceships across sample steps: hash the ship's
+            // normalized shape (position-independent) combined with a coarse
+            // grid quadrant (2x2). A c/4 diagonal glider moves ~125 cells per
+            // 500 steps, easily crossing quadrant boundaries, so the same ship
+            // seen at successive samples won't collide. Two distinct ships of
+            // the same type in different quadrants are counted separately.
+            let grid_size = grid.size();
+            for (pattern, comp) in patterns.iter().zip(components.iter()) {
+                if let PatternClass::Spaceship { .. } = pattern {
+                    let shape_hash = analysis::component_shape_hash(comp);
+                    // Center of mass → 2x2 quadrant
+                    let cx: i64 = comp.iter().map(|c| c.x as i64).sum();
+                    let cy: i64 = comp.iter().map(|c| c.y as i64).sum();
+                    let n = comp.len() as i64;
+                    let qx = if cx / n < grid_size.x as i64 / 2 { 0u64 } else { 1 };
+                    let qy = if cy / n < grid_size.y as i64 / 2 { 0u64 } else { 1 };
+                    let mut hasher = rustc_hash::FxHasher::default();
+                    shape_hash.hash(&mut hasher);
+                    qx.hash(&mut hasher);
+                    qy.hash(&mut hasher);
+                    self.seen_ships.insert(hasher.finish());
+                }
+            }
+            self.stats.transient_spaceships = self.seen_ships.len();
             for &p in &summary.oscillators {
                 self.stats.max_oscillator_period = self.stats.max_oscillator_period.max(p);
             }
