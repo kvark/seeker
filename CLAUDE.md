@@ -4,24 +4,60 @@
 
 Seeker is an experimental research project exploring how life emerges from simple rules (QLUE - Question of Life, Universe, and Everything). It's a cellular automata-based system that searches for interesting, survivable patterns through evolutionary mutation and selection.
 
+The ultimate goal is understanding the **conditions for emergence** — what properties of a local physics (rule set) allow complex, structured, agent-like behavior to arise from simple initial conditions? This is approached via:
+1. Building a reliable **detector** for interestingness at multiple levels
+2. Calibrating that detector on known ground truth (Game of Life's cataloged objects)
+3. Using the trusted detector to explore unknown rule spaces
+
 Two modes:
 - **Play** — manually advance a cellular automaton step-by-step in a TUI
 - **Find** — automatically search for interesting rule configurations via evolutionary algorithms
 
+## Methodology: Detector-First
+
+The project deliberately spends time on frozen B3/S23 (standard Game of Life)
+before exploring novel rule spaces. Rationale: GoL has the richest catalog of
+known objects (gliders, guns, pulsars, methuselahs, spaceships of every size)
+with precise expected frequencies from Catagolue's census of ~10¹³ soups. This
+serves as a **labeled dataset** for developing and validating the interestingness
+detector.
+
+Concretely: if our detector can't find/score a glider, it can't be trusted to
+recognize analogous translating structures in an unknown rule. Each level of the
+interestingness hierarchy needs calibration against known GoL phenomena before
+we point it at the probabilistic rule space.
+
+Current calibration status:
+- Levels 1-3 (persistence, structure, dynamics): calibrated — reliably detects
+  still lifes, blinkers, toads, beacons, gliders in final and transient states.
+- Level 4 (narrative): implemented but not yet validated against known
+  methuselah event sequences (R-pentomino should produce ~1103 steps of drama).
+- Levels 5-6 (emergence, composability): implemented but need calibration
+  against guns and multi-component mechanisms.
+
+Once the detector passes calibration at all levels, the search shifts to
+exploring the full probabilistic rule space with the detector as the fitness
+landscape.
+
 ## Architecture
 
-- `src/grid.rs` — 2D wrapped-coordinate grid with `Option<Cell>` storage
-- `src/sim.rs` — Simulation engine: probabilistic CA rules, grid advancement, statistics
-- `src/lab.rs` — Evolutionary search: parallel experiments, fitness-proportional selection, mutation
-- `src/main.rs` — TUI application (ratatui + crossterm), play/find modes
+- `src/grid.rs` — 2D grid with `Option<Cell>` storage, supports Wrap and Dead boundaries
+- `src/sim.rs` — Simulation engine: probabilistic CA rules, compiled kernel fast path, period detection, transient analysis
+- `src/lab.rs` — Evolutionary search: MAP-Elites quality-diversity, parallel experiments via Choir
+- `src/analysis.rs` — Post-stabilization pattern classification (still lifes, oscillators, spaceships) via connected components
+- `src/narrative.rs` — Event tracking (splits, merges, births, deaths) for Level 4 measurement
+- `src/gpu.rs` — Batch CA simulation on GPU via blade-graphics compute shaders
+- `src/main.rs` — CLI modes: play (TUI), find (TUI), headless, replay
 
 ## How the Search Works
 
-1. **Rules**: Probabilistic CA with a weighted kernel (neighborhood), spawn table, and keep table
-2. **Parallel experiments**: Up to `max_active` concurrent simulations via Choir work-stealing executor
-3. **Fitness-proportional selection**: Parents chosen weighted by fitness score
-4. **Mutations**: One of {spawn probs, keep probs, kernel weights, grid size} mutated per offspring
-5. **Fitness**: `log2(steps)` for extinct/saturate, `100 - 60*alive_avg` for survivors
+1. **Rules**: Probabilistic CA with a weighted kernel (neighborhood), spawn table, and keep table. In frozen mode, rules are locked to B3/S23 and only initial conditions evolve.
+2. **MAP-Elites**: Quality-diversity search over a 2D behavior space (density × interestingness). Uniform selection across occupied cells provides diversity pressure without explicit novelty mechanisms.
+3. **Parallel experiments**: Up to `max_active` concurrent simulations via Choir work-stealing executor. Workers check for boring experiments (low variance streak) and abort early.
+4. **Mutations (frozen mode)**: 30% fresh soup, 30% focused flip (1-8 cells near existing alive), 20% satellite soup, 20% symmetric soup. Soup strategies: census (16×16@50%), methuselah (10-20@37%), dense small, large sparse.
+5. **Mutations (probabilistic mode)**: 1-3 mutations per offspring across spawn/keep tables, kernel weights, grid size, boundary mode.
+6. **Fitness (frozen)**: composite of variance, late stabilization, analysis (unique patterns, ships×30, oscillator periods, composability), birth rate, spatial variance, narrative richness, transient ships, high periods.
+7. **GPU path**: Bitpacked grids on GPU, B3/S23 compute shader, stats-only readback. Lab remains backend-agnostic.
 
 ## Hierarchy of Interestingness
 
@@ -41,10 +77,10 @@ Seeker's search should climb this ladder:
 |-------|----------|---------------|---------|-----------|
 | 1 | **Persistence** | Didn't die or saturate | Survivors | Yes (fitness) |
 | 2 | **Structure** | Has identifiable, separated components | Block + blinker debris | Yes (pattern count, analysis.rs) |
-| 3 | **Dynamics** | Components oscillate or translate | Glider, blinker | Yes (period detection, birth rate) |
-| 4 | **Narrative** | Structural events happen over time: splits, collisions, births, deaths of components | Methuselah R-pentomino: 1103 steps of drama | **Not yet** |
-| 5 | **Emergence** | Behavior needs higher-level description; spatial structure is non-uniform and evolving | Gun producing gliders; localized activity regions | **Not yet** |
-| 6 | **Composability** | Simple classified units compose into functional mechanisms; components are independent and recognizable | Glider + eater interaction; gun = oscillator + emitter | **Not yet** |
+| 3 | **Dynamics** | Components oscillate or translate | Glider, blinker | Yes (period detection, birth rate, transient analysis) |
+| 4 | **Narrative** | Structural events happen over time: splits, collisions, births, deaths of components | Methuselah R-pentomino: 1103 steps of drama | Yes (narrative.rs) — needs calibration |
+| 5 | **Emergence** | Behavior needs higher-level description; spatial structure is non-uniform and evolving | Gun producing gliders; localized activity regions | Partial (4×4 spatial variance) — needs calibration |
+| 6 | **Composability** | Simple classified units compose into functional mechanisms; components are independent and recognizable | Glider + eater interaction; gun = oscillator + emitter | Yes (classified_ratio, independence) — needs calibration |
 
 ### Level 4: Narrative — Event Tracking During Simulation
 
@@ -81,64 +117,78 @@ meaningful.
 patterns. Already partially measured by `analysis.rs`; needs enhancement to
 track classified-cell coverage and component independence.
 
-## High-Level Analysis & Suggestions
+## Current Status
 
-### 1. Fitness Function Is Coarse
-Any simulation surviving to completion (even a boring static blob) gets fitness ~46-100, dominating experiments that went extinct at step 2048 (fit ~11). The search selects for "didn't die" not "interesting."
-**Suggestion**: Incorporate `alive_ratio_variance` into fitness — high variance = oscillation/dynamism.
+### What works
+- MAP-Elites quality-diversity search with uniform cell selection (replaced fitness-proportional)
+- Compiled kernel + deterministic fast path (2-3x speedup for B3/S23)
+- Early discard via alive_ratio_variance streak detection
+- Transient analysis (steps 500-3000) catches gliders before they crash into debris
+- Diverse soup strategies: census, methuselah, symmetric, satellite, focused flip
+- Multiple mutations per offspring (1-3) for faster co-adaptation
+- Batch spawning fills all available worker slots
+- ~31% MAP-Elites coverage on 128×128, fitness 253-257, up to 25 transient gliders
+- GPU shader compiles and passes tests on lavapipe
 
-### 2. Only One Mutation Per Generation
-`mutate_snap` applies exactly one mutation type (25% chance each). Co-adapting spawn+keep tables requires many generations.
-**Suggestion**: Multiple mutations per offspring (Poisson-distributed), or correlated mutations.
+### Detector calibration gaps (blocking rule-space exploration)
+1. **Pulsar recognition**: `name_pattern` says 12 cells but a pulsar has 48 cells
+   decomposed into multiple 8-connected components. Need multi-component
+   pseudo-object merging (what apgsearch calls "constellations").
+2. **Narrative validation**: Need to run R-pentomino through narrative tracker and
+   verify event count/diversity matches expected behavior (high splits early,
+   glider births mid-run, then calm).
+3. **Emergence calibration**: No known gun has been tested against the spatial
+   variance metric. A Gosper gun should produce high sustained spatial variance +
+   periodic birth events.
+4. **Transient counting**: A long-lived glider is counted at multiple sample points,
+   inflating `transient_spaceships`. Should track unique ships (by trajectory hash)
+   rather than sample occurrences.
 
-### 3. No Population Diversity Mechanism
-Fitness-proportional selection has no diversity pressure. One high-fitness experiment can dominate, causing premature convergence.
-**Suggestion**: Tournament selection, novelty bonus, or occasional random injection.
+### Known remaining issues
+- GPU path is not integrated with Laboratory (island module)
+- GPU submits+waits once per CA step (should batch K steps per submission)
+- Shader always wraps (ignores Dead boundary mode)
+- `avg_velocity` cell field computed but unused — 16 bytes/cell overhead
+- Narrative matching uses centroid distance with permissive threshold; cell-overlap
+  identity would be more accurate for detecting splits/merges
 
-### 4. Experiment Pool Grows Unbounded
-All concluded experiments remain in the pool forever. Early lucky survivors permanently skew selection.
-**Suggestion**: Sliding window or capped archive of N best. Decay fitness over time.
+### Previously fixed (from original analysis)
+- ~~Fitness function is coarse~~ → composite fitness with level 2-6 signals
+- ~~Only one mutation per generation~~ → 1-3 mutations (50/30/20% distribution)
+- ~~No population diversity mechanism~~ → MAP-Elites with uniform cell selection
+- ~~Experiment pool grows unbounded~~ → capped archive, concluded experiments pruned
+- ~~Worker thread count is hardcoded~~ → workers scaled to max_active
 
-### 5. Worker Thread Count Is Hardcoded
-Only 2 Choir workers but `max_active` defaults to 5 experiments.
-**Suggestion**: Scale workers to match cores or `max_active`.
+## GPU Acceleration (blade-graphics)
 
-### 6. Kernel Mutation Is String-Level Surgery
-Kernel weights mutated via ASCII byte manipulation with `unsafe`. Fragile, limits weights to 0-9.
-**Suggestion**: Store kernel as numeric 2D structure, mutate numerically.
+### What's Built (Phase 1, partial)
+- `src/gpu.rs`: `GpuSimulator` struct with blade context, pipeline, buffers
+- `src/shaders/ca_step.wgsl`: B3/S23 compute shader (workgroup 256, toroidal wrap)
+- Bitpacked grid upload, ping-pong stepping, stats readback (alive, births, regions)
+- Tests pass on lavapipe (blinker oscillation, pack/unpack roundtrip)
+- `GpuSimulator::new` is infallible (panics on failure — shaders must work)
 
-### 7. Cell Velocity Tracked But Unused for Fitness
-`avg_velocity` computed per cell but never aggregated for fitness. Could be a secondary interestingness signal.
+### Remaining work
 
-### 8. No Structural Kernel Mutation
-Only weight values mutate, not kernel shape. Search is locked into initial topology.
-**Suggestion**: Add mutations that add/remove kernel positions to explore different neighborhoods.
+**Integration (Phase 1 completion)**:
+- Wire `GpuSimulator` into `Laboratory` as a batch backend
+- Batch K steps per GPU submission (currently syncs per step — latency bound)
+- Honor `BoundaryMode::Dead` in shader (currently always wraps)
+- Multi-fidelity funnel: GPU for fast screening → CPU `Simulation` for top
+  candidates needing narrative/analysis
 
-## Implemented Improvements
+**Phase 2: Probabilistic rules on GPU**:
+- Table-driven spawn/keep (upload probability tables as uniform buffer)
+- Philox counter-based RNG: `hash(grid_id, step, cell_idx)` → deterministic per-cell coin
+- This enables rule-space exploration at GPU speed
 
-### Early Discard of Boring Experiments
-Workers now check alive_ratio_variance at periodic intervals during simulation.
-If variance stays below `BORING_VARIANCE_THRESHOLD` (0.0001) for
-`BORING_STREAK_LIMIT` (3) consecutive checks, the experiment is aborted via an
-atomic flag. This frees up worker slots for more promising experiments.
+**Phase 3: GPU-side early discard**:
+- Readback alive counts every ~500 steps, zero boring grids
+- Requires batched submission (Phase 1 fix) to amortize readback cost
 
-### Novelty Penalty
-Concluded experiments have their signature hashed (quantized alive_ratio,
-variance, period). Duplicate signatures in a sliding window of 100 recent
-experiments receive a fitness penalty (10 points per duplicate, max 30). This
-prevents the population from converging on a single pattern type.
-
-### Multiple Mutations Per Offspring
-Instead of exactly one mutation, offspring now receive 1-3 mutations (50%/30%/20%
-distribution). This allows spawn+keep tables and initial conditions to co-adapt
-faster, reducing the number of generations needed to find interesting
-combinations.
-
-## GPU Acceleration Plan (blade-graphics)
-
-### Goal
-Simulate thousands of CA grids simultaneously on GPU, replacing the CPU-bound
-Choir worker pool. Target: 100-1000x throughput improvement.
+**Phase 4: GPU-side analysis**:
+- Parallel connected components (label propagation or union-find)
+- Would eliminate CPU re-simulation for pattern classification
 
 ### Architecture
 
@@ -162,63 +212,31 @@ CPU (lab.rs)                          GPU (blade compute)
                                      └──────────────────────┘
 ```
 
-### Data Layout
+### Performance Target
+- 128×128 grid, 1024 grids batched: ~16M cells per step
+- ~2000 experiments/second vs current ~1 experiment/second (1000x)
 
-Each grid stored as a bitfield: 1 bit per cell, packed into u32 words.
-For a 128×128 grid = 16,384 bits = 512 u32s = 2KB per grid.
-1024 grids = 2MB total — fits easily in GPU memory.
+## Roadmap: Detector Calibration → Rule Exploration
 
-No need to transfer full grids back to CPU. Only transfer per-grid statistics
-(alive count, birth count, spatial variance) for fitness evaluation.
+### Phase A: Calibrate the detector (current focus)
+1. Fix pulsar/pseudo-object recognition (multi-component merging)
+2. Validate narrative tracker against R-pentomino expected behavior
+3. Test emergence metric against Gosper gun
+4. Deduplicate transient ship counting (trajectory hash)
 
-### Compute Shader
+### Phase B: Complete GPU integration
+1. Batch K steps per submission, add Dead boundary support
+2. Multi-fidelity funnel: GPU screening → CPU detailed analysis
+3. Table-driven rules + Philox RNG in shader (Phase 2)
 
-See `src/shaders/ca_step.wgsl` for the WGSL compute shader implementation.
+### Phase C: Rule-space exploration
+1. Mean-field pre-filter: analytically discard rules with trivial fixed points
+2. MAP-Elites over rule space: genome = spawn/keep/kernel, behavior = ladder scores
+3. Landmarks: verify B3/S23, HighLife, Seeds, Day & Night score as expected
+4. Interpolation: are "supports life" regions connected or isolated islands?
 
-### blade-graphics Integration Steps
-
-1. **Add dependency**: `blade-graphics = { git = "https://github.com/kvark/blade" }`
-
-2. **New module `src/gpu.rs`**:
-   - `GpuSimulator` struct: holds blade `Context`, pipeline, buffers
-   - `fn upload_grids(&mut self, soups: &[BitGrid])` — pack soups into GPU buffer
-   - `fn step(&mut self, count: usize)` — dispatch CA step shader N times,
-     ping-ponging between grids_in and grids_out
-   - `fn readback_stats(&self) -> Vec<GridStats>` — read stats buffer back to CPU
-
-3. **Modify `src/lab.rs`**:
-   - Add `GpuBatch` mode alongside Choir workers
-   - Selection/mutation stays on CPU
-   - Instead of spawning one Choir task per experiment, batch 256-1024 soups,
-     upload to GPU, run K steps, readback stats, evaluate fitness
-   - Early discard: after every ~500 GPU steps, readback stats and discard
-     boring grids (zero the grid buffer to skip further work)
-
-4. **Shader compilation**: blade uses Naga + WGSL. Ship shader as
-   `include_str!("shaders/ca_step.wgsl")` compiled at runtime.
-
-5. **Probabilistic rules**: For non-frozen mode, add a counter-based RNG
-   (Philox) to the shader. Each cell gets deterministic randomness from
-   `hash(grid_id, step, cell_idx)`. For frozen GoL mode, no RNG needed.
-
-### Performance Estimate
-
-- 128×128 grid = 16K cells, 1 workgroup of 256 threads = 64 dispatches per grid per step
-- With 1024 grids batched: ~16M cells per step
-- Modern GPU at ~10 TFLOPS: each step takes ~0.1ms
-- 5000 steps = 0.5 seconds for 1024 experiments
-- **~2000 experiments/second** vs current ~1 experiment/second
-
-### Phases
-
-1. **Phase 1**: GPU batch simulation for frozen GoL (deterministic B3/S23).
-   No RNG on GPU. Stats readback for fitness. CPU still does analysis/selection.
-
-2. **Phase 2**: GPU RNG for probabilistic rules (non-frozen mode). Philox
-   counter-based RNG in shader.
-
-3. **Phase 3**: GPU-side early discard. Readback stats periodically, zero out
-   boring grids to avoid wasting compute cycles.
-
-4. **Phase 4**: GPU-side analysis. Run connected components on GPU (parallel
-   BFS) for even faster fitness evaluation.
+### Phase D: Rule-agnostic emergence metrics
+1. Damage spreading (Derrida): twin grids, 1-cell perturbation, track Hamming divergence
+2. Compression complexity: zstd ratio of spacetime blocks
+3. Shift cross-correlation: detect translating structures without rule-specific classification
+4. Stimulus-response: perturb stabilized system, measure response locality
