@@ -1007,13 +1007,13 @@ mod screen {
             let simulator = simulators
                 .entry((width, height, boundary))
                 .or_insert_with(|| {
-                    GpuSimulator::new(GpuBatchConfig {
-                        grid_width: width as u32,
-                        grid_height: height as u32,
-                        steps_per_batch: config.interval as u32,
-                        num_grids: config.batch as u32,
+                    GpuSimulator::new(GpuBatchConfig::b3s23(
+                        width as u32,
+                        height as u32,
+                        config.interval as u32,
+                        config.batch as u32,
                         boundary,
-                    })
+                    ))
                 });
             while !members.is_empty() {
                 let take = members.len().min(config.batch);

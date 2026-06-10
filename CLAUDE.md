@@ -179,12 +179,20 @@ track classified-cell coverage and component independence.
   back to direct spawning, so a slow GPU (lavapipe) never starves the search.
   See `data/hunt-gpu.ron`.
 
-### Remaining work
+### Phase 2: Complete
+- Table-driven spawn/keep: `GpuBatchConfig` carries `spawn_table` and
+  `keep_table` (`[f32; 9]` for Moore neighborhood). Uploaded once to GPU
+  storage buffers. Shader indexes `spawn_table[count]` / `keep_table[count]`.
+- Philox 2x32-10 counter-based RNG in WGSL: `rand_f32(grid_idx, step, cell_idx)`
+  gives deterministic per-cell randomness. Matching CPU reference in `philox2x32()`.
+- `rule_mode` switch in shader: 0 = hardcoded B3/S23 (fast path, no RNG),
+  1 = table-driven probabilistic. Mode auto-selected from tables.
+- Tests: `table_driven_matches_hardcoded` (mode 1 parity with mode 0),
+  `highlife_differs_from_gol` (B36/S23 via tables), `probabilistic_rules_use_rng`
+  (per-grid RNG seeding).
+- `GpuBatchConfig::b3s23()` convenience constructor for existing callers.
 
-**Phase 2: Probabilistic rules on GPU**:
-- Table-driven spawn/keep (upload probability tables as uniform buffer)
-- Philox counter-based RNG: `hash(grid_id, step, cell_idx)` → deterministic per-cell coin
-- This enables rule-space exploration at GPU speed
+### Remaining work
 
 **Phase 3: GPU-side early discard**:
 - Readback alive counts every ~500 steps, zero boring grids
@@ -231,7 +239,7 @@ CPU (lab.rs)                          GPU (blade compute)
 ### Phase B: Complete GPU integration
 1. ~~Batch K steps per submission, add Dead boundary support~~ done
 2. ~~Multi-fidelity funnel: GPU screening → CPU detailed analysis~~ done
-3. Table-driven rules + Philox RNG in shader (Phase 2)
+3. ~~Table-driven rules + Philox RNG in shader (Phase 2)~~ done
 
 ### Phase C: Rule-space exploration
 1. Mean-field pre-filter: analytically discard rules with trivial fixed points
