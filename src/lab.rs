@@ -606,6 +606,23 @@ impl Laboratory {
             self.mutate_snap_frozen(snap);
             return;
         }
+        // Try up to a few times to produce a mean-field viable rule.
+        // This avoids wasting simulation slots on rules that will
+        // inevitably die or saturate.
+        let saved_rules = snap.rules.clone();
+        for attempt in 0..5 {
+            if attempt > 0 {
+                snap.rules = saved_rules.clone();
+            }
+            self.mutate_snap_rules(snap);
+            if crate::rules::is_viable(&snap.rules) {
+                return;
+            }
+        }
+        // Gave up — use the last mutation anyway.
+    }
+
+    fn mutate_snap_rules(&mut self, snap: &mut Snap) {
         // Apply 1-3 mutations for faster co-adaptation
         let num_mutations = match self.rng.gen_range(0..10) {
             0..=4 => 1,
