@@ -338,10 +338,10 @@ pub struct Statistics {
     pub stabilized_step: usize,
     /// Number of spaceships detected during transient analysis sampling.
     pub transient_spaceships: usize,
-    /// Named pattern types found during transient analysis (e.g. "glider").
-    /// Fixed-size buffer; transient_ship_name_count tracks how many are valid.
-    pub transient_ship_names: [&'static str; 8],
-    pub transient_ship_name_count: usize,
+    /// Named pattern types found during transient analysis (e.g. "glider", "pulsar").
+    /// Fixed-size buffer; transient_pattern_name_count tracks how many are valid.
+    pub transient_pattern_names: [&'static str; 8],
+    pub transient_pattern_name_count: usize,
     /// Highest oscillator period seen during transient or final analysis.
     pub max_oscillator_period: usize,
 }
@@ -471,8 +471,8 @@ impl Simulation {
                 period: 0,
                 stabilized_step: 0,
                 transient_spaceships: 0,
-                transient_ship_names: [""; 8],
-                transient_ship_name_count: 0,
+                transient_pattern_names: [""; 8],
+                transient_pattern_name_count: 0,
                 max_oscillator_period: 0,
             },
             hash_seen: FxHashMap::default(),
@@ -619,25 +619,19 @@ impl Simulation {
         // Transient analysis: sample periodically during the active transient phase
         // to detect spaceships and high-period oscillators that won't survive to stabilization.
         // Only for deterministic rules (frozen GoL) where analysis is meaningful.
-        // Start early (step 200) so gliders are caught before wrapping/dying.
         if self.rules.deterministic
             && self.stats.period == 0
             && self.step >= 200
             && self.step <= 5000
-            && self.step % 200 == 0
+            && self.step % 500 == 0
         {
             use crate::analysis::{self, PatternClass};
             let (patterns, summary, components) = analysis::analyze_grid(grid);
-            // Deduplicate spaceships across sample steps: hash the ship's
-            // normalized shape (position-independent) combined with a coarse
-            // grid quadrant (2x2). A c/4 diagonal glider moves ~125 cells per
-            // 500 steps, easily crossing quadrant boundaries, so the same ship
-            // seen at successive samples won't collide. Two distinct ships of
-            // the same type in different quadrants are counted separately.
             let grid_size = grid.size();
             for (pattern, comp) in patterns.iter().zip(components.iter()) {
+                let shape_hash = analysis::component_shape_hash(comp);
+                let maybe_name = analysis::name_pattern(shape_hash, pattern);
                 if let PatternClass::Spaceship { .. } = pattern {
-                    let shape_hash = analysis::component_shape_hash(comp);
                     let cx: i64 = comp.iter().map(|c| c.x as i64).sum();
                     let cy: i64 = comp.iter().map(|c| c.y as i64).sum();
                     let n = comp.len() as i64;
@@ -648,11 +642,22 @@ impl Simulation {
                     qx.hash(&mut hasher);
                     qy.hash(&mut hasher);
                     if self.seen_ships.insert(hasher.finish()) {
-                        if let Some(name) = analysis::name_pattern(shape_hash, pattern) {
-                            let names = &self.stats.transient_ship_names[..self.stats.transient_ship_name_count];
-                            if !names.contains(&name) && self.stats.transient_ship_name_count < 8 {
-                                self.stats.transient_ship_names[self.stats.transient_ship_name_count] = name;
-                                self.stats.transient_ship_name_count += 1;
+                        if let Some(name) = maybe_name {
+                            let names = &self.stats.transient_pattern_names[..self.stats.transient_pattern_name_count];
+                            if !names.contains(&name) && self.stats.transient_pattern_name_count < 8 {
+                                self.stats.transient_pattern_names[self.stats.transient_pattern_name_count] = name;
+                                self.stats.transient_pattern_name_count += 1;
+                            }
+                        }
+                    }
+                }
+                if let PatternClass::Oscillator { period, .. } = pattern {
+                    if *period > 2 {
+                        if let Some(name) = maybe_name {
+                            let names = &self.stats.transient_pattern_names[..self.stats.transient_pattern_name_count];
+                            if !names.contains(&name) && self.stats.transient_pattern_name_count < 8 {
+                                self.stats.transient_pattern_names[self.stats.transient_pattern_name_count] = name;
+                                self.stats.transient_pattern_name_count += 1;
                             }
                         }
                     }

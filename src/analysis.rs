@@ -248,8 +248,10 @@ pub fn classify_component(cells: &[Coordinates]) -> PatternClass {
     let initial_hash = normalized_hash(&grid);
     let initial_com = center_of_mass(&grid).unwrap();
 
-    // Run up to 60 steps looking for the pattern to return
-    for step in 1..=60 {
+    // Run up to 180 steps looking for the pattern to return.
+    // Needs to exceed common periods: pentadecathlon (15), pulsar (3),
+    // plus margin for complex oscillators.
+    for step in 1..=180 {
         grid = gol_step(&grid);
 
         if grid.alive_count() == 0 {
@@ -292,10 +294,13 @@ pub fn name_pattern(_hash: u64, class: &PatternClass) -> Option<&'static str> {
         PatternClass::StillLife { cells: 6 } => Some("beehive/ship"),
         PatternClass::StillLife { cells: 7 } => Some("loaf/long-boat"),
         PatternClass::StillLife { cells: 8 } => Some("pond/long-ship"),
+        PatternClass::StillLife { cells: 9 } => Some("hat/shillelagh"),
+        PatternClass::StillLife { cells: 10 } => Some("10-cell-sl"),
         PatternClass::Oscillator { period: 2, cells: 3 } => Some("blinker"),
         PatternClass::Oscillator { period: 2, cells: 6 } => Some("toad/beacon"),
+        PatternClass::Oscillator { period: 2, cells: 8 } => Some("beacon"),
         PatternClass::Oscillator { period: 3, cells: 48 } => Some("pulsar"),
-        PatternClass::Oscillator { period: 15, cells: 12 } => Some("pentadecathlon"),
+        PatternClass::Oscillator { period: 15, cells } if *cells >= 12 && *cells <= 18 => Some("pentadecathlon"),
         PatternClass::Spaceship { period: 4, cells: 5 } => Some("glider"),
         PatternClass::Spaceship { period: 4, cells: 9 } => Some("LWSS"),
         PatternClass::Spaceship { period: 4, cells: 13 } => Some("MWSS"),

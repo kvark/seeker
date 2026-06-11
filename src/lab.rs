@@ -313,9 +313,20 @@ impl Laboratory {
                         score += summary.unique_patterns.min(20) * 2;
                         score += summary.spaceships.len() * 30;
                         for &p in &summary.oscillators {
-                            score += if p > 2 { p.min(20) } else { 1 };
+                            score += if p > 2 { p.min(20) * 3 } else { 1 };
                         }
                         score += summary.composability_score();
+                        // Bonus for rare named patterns
+                        for name in &summary.named_patterns {
+                            score += match *name {
+                                "pulsar" => 50,
+                                "pentadecathlon" => 80,
+                                "LWSS" => 60,
+                                "MWSS" => 70,
+                                "HWSS" => 80,
+                                _ => 0,
+                            };
+                        }
                         score
                     } else {
                         0
@@ -334,6 +345,18 @@ impl Laboratory {
                     } else {
                         0
                     };
+                    // Bonus for named patterns found during transient analysis
+                    let mut transient_rare_score = 0usize;
+                    for &name in &state.transient_pattern_names[..state.transient_pattern_name_count] {
+                        transient_rare_score += match name {
+                            "pulsar" => 40,
+                            "pentadecathlon" => 60,
+                            "LWSS" => 50,
+                            "MWSS" => 60,
+                            "HWSS" => 70,
+                            _ => 0,
+                        };
+                    }
                     base + var_score
                         + late_score
                         + analysis_score
@@ -342,6 +365,7 @@ impl Laboratory {
                         + narrative_score
                         + transient_ship_score
                         + high_period_score
+                        + transient_rare_score
                 } else {
                     let base = 100 - (60.0 * state.alive_ratio_average) as usize;
                     let birth_bonus = (state.birth_rate_average * 3000.0).min(15.0) as usize;
@@ -687,24 +711,33 @@ impl Laboratory {
     /// Mutation for frozen_rules mode: only mutate initial conditions.
     /// Balanced between exploration (new soups) and exploitation (local edits).
     fn mutate_snap_frozen(&mut self, snap: &mut Snap) {
-        match self.rng.gen_range(0..10) {
-            0..=2 => {
-                // 30%: fresh random soup — pure exploration
+        match self.rng.gen_range(0..20) {
+            0..=4 => {
+                // 25%: fresh random soup — pure exploration
                 self.create_soup(snap);
             }
-            3..=5 => {
-                // 30%: focused flip — small perturbation near existing alive cells
+            5..=9 => {
+                // 25%: focused flip — small perturbation near existing alive cells
                 let count = self.rng.gen_range(1..=8);
                 self.focused_flip(snap, count);
             }
-            6..=7 => {
-                // 20%: add a second small soup patch nearby — creates multi-center dynamics
+            10..=12 => {
+                // 15%: add a second small soup patch nearby — creates multi-center dynamics
                 self.add_satellite_soup(snap);
             }
-            _ => {
-                // 20%: symmetric soup — bilateral or 4-fold symmetry
-                // Many interesting patterns (pulsars, HWSS) have symmetry
+            13..=15 => {
+                // 15%: symmetric soup — bilateral or 4-fold symmetry
                 self.create_symmetric_soup(snap);
+            }
+            16..=17 => {
+                // 10%: known methuselah seed — produces rich long-lived dynamics
+                self.create_methuselah_seed(snap);
+            }
+            _ => {
+                // 10%: methuselah + perturbation — known seed with random noise
+                self.create_methuselah_seed(snap);
+                let count = self.rng.gen_range(1..=5);
+                self.focused_flip(snap, count);
             }
         }
     }
@@ -850,6 +883,62 @@ impl Laboratory {
                 grid.init(cx + dx, cy - dy - 1); // vertical mirror
                 grid.init(cx - dx - 1, cy - dy - 1); // both
             }
+        }
+
+        snap.data = Data::unparse(&grid);
+        snap.random_seed = self.rng.gen();
+    }
+
+    /// Create a grid seeded with a known methuselah pattern.
+    /// Methuselahs are small initial patterns that evolve for many generations,
+    /// producing gliders, oscillators, and other interesting debris.
+    fn create_methuselah_seed(&mut self, snap: &mut Snap) {
+        use crate::grid::{Coordinates, Grid};
+
+        let grid_power = self.rng.gen_range(self.config.size_power.clone());
+        let grid_size = 1i32 << grid_power;
+        let mut grid = Grid::new(Coordinates {
+            x: grid_size,
+            y: grid_size,
+        });
+        let cx = grid_size / 2;
+        let cy = grid_size / 2;
+
+        // Known methuselahs: (name, relative cell positions)
+        // R-pentomino: 1103 generations, produces 6 gliders
+        // Acorn: 5206 generations, produces many gliders
+        // Diehard: goes extinct at gen 130
+        // Pi-heptomino: 173 generations, produces interesting debris
+        // Thunderbird: produces complex symmetric debris
+        // Herschel: key component of many guns
+        let patterns: &[&[(i32, i32)]] = &[
+            // R-pentomino
+            &[(0, -1), (1, -1), (-1, 0), (0, 0), (0, 1)],
+            // Acorn
+            &[(-3, 0), (-2, 0), (-2, -2), (0, -1), (1, 0), (2, 0), (3, 0)],
+            // Pi-heptomino
+            &[(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (1, 1)],
+            // Thunderbird
+            &[(-1, -1), (0, -1), (1, -1), (0, 1), (0, 2), (0, 3)],
+            // B-heptomino
+            &[(0, 0), (1, 0), (-1, 1), (0, 1), (1, 1), (-1, 2), (1, 2)],
+            // Herschel
+            &[(0, 0), (0, 1), (0, 2), (1, 2), (2, 1), (2, 0), (-1, 0)],
+        ];
+
+        let idx = self.rng.gen_range(0..patterns.len());
+        let pattern = patterns[idx];
+
+        // Random rotation (0, 90, 180, 270 degrees)
+        let rot = self.rng.gen_range(0..4);
+        for &(dx, dy) in pattern {
+            let (rx, ry) = match rot {
+                0 => (dx, dy),
+                1 => (-dy, dx),
+                2 => (-dx, -dy),
+                _ => (dy, -dx),
+            };
+            grid.init(cx + rx, cy + ry);
         }
 
         snap.data = Data::unparse(&grid);

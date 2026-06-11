@@ -125,16 +125,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !survivors.is_empty() {
                 println!("### Top Survivors");
                 println!();
-                println!("| ID | Fitness | Alive Avg | Alive Var | Birth Rate | Spatial Var | Period | Ships | Ship Types | MaxOsc | Steps | Snap |");
-                println!("|----|---------|-----------|-----------|------------|-------------|--------|-------|------------|--------|-------|------|");
+                println!("| ID | Fitness | Alive Avg | Alive Var | Birth Rate | Spatial Var | Period | Ships | Patterns | MaxOsc | Steps | Snap |");
+                println!("|----|---------|-----------|-----------|------------|-------------|--------|-------|----------|--------|-------|------|");
                 let top_n = survivors.len().min(10);
                 for exp in &survivors[..top_n] {
                     if let Some(sim::Conclusion::Done(stats, _)) = &exp.conclusion {
                         let snap_file = format!("e{}-{}.ron", exp.id, exp.steps);
-                        let ship_types = if stats.transient_ship_name_count == 0 {
+                        let ship_types = if stats.transient_pattern_name_count == 0 {
                             "-".to_string()
                         } else {
-                            stats.transient_ship_names[..stats.transient_ship_name_count].join(", ")
+                            stats.transient_pattern_names[..stats.transient_pattern_name_count].join(", ")
                         };
                         println!(
                             "| {} | {} | {:.4} | {:.6} | {:.6} | {:.6} | {} | {} | {} | {} | {} | {} |",
