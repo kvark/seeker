@@ -79,7 +79,10 @@ impl std::fmt::Display for AnalysisSummary {
     }
 }
 
-/// Extract connected components from a grid (8-connected, wrapping).
+/// Extract connected components from a grid (8-connected).
+/// Uses unwrapped coordinates so components crossing wrap boundaries
+/// remain contiguous (e.g. a glider at x=127→0 gets coords 127,128,129
+/// instead of 127,0,1).
 pub fn connected_components(grid: &Grid) -> Vec<Vec<Coordinates>> {
     let size = grid.size();
     let total = (size.x * size.y) as usize;
@@ -104,17 +107,16 @@ pub fn connected_components(grid: &Grid) -> Vec<Vec<Coordinates>> {
                             }
                             let raw_x = pos.x + dx;
                             let raw_y = pos.y + dy;
-                            // Use the grid's boundary mode: wrapping or dead
                             if grid.get(raw_x, raw_y).is_none() {
                                 continue;
                             }
-                            // For indexing visited[], use wrapped coords
                             let nx = raw_x.rem_euclid(size.x);
                             let ny = raw_y.rem_euclid(size.y);
                             let nidx = ny as usize * size.x as usize + nx as usize;
                             if !visited[nidx] {
                                 visited[nidx] = true;
-                                queue.push_back(Coordinates { x: nx, y: ny });
+                                // Store unwrapped coords to keep contiguity
+                                queue.push_back(Coordinates { x: raw_x, y: raw_y });
                             }
                         }
                     }
@@ -281,7 +283,7 @@ pub fn classify_component(cells: &[Coordinates]) -> PatternClass {
 }
 
 /// Return the name of a known GoL pattern given a canonical hash.
-fn name_pattern(_hash: u64, class: &PatternClass) -> Option<&'static str> {
+pub fn name_pattern(_hash: u64, class: &PatternClass) -> Option<&'static str> {
     // We identify by (class, cell_count, hash) to avoid computing complex canonical forms.
     // Instead, we use the classification + cell count.
     match class {

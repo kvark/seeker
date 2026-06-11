@@ -20,7 +20,7 @@
 		},
 	),
 	limits: (
-		max_steps: 20000,
+		max_steps: 8000,
 		update_weight: 0.005,
 	),
 	boundary: Wrap,

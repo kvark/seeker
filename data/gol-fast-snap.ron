@@ -1,10 +1,10 @@
 (
 	data: Random(
-		width: 256,
-		height: 256,
+		width: 64,
+		height: 64,
 		alive_ratio: 0.02,
 	),
-	random_seed: 1337,
+	random_seed: 42,
 	rules: (
 		kernel: [
 			"111",
@@ -20,8 +20,8 @@
 		},
 	),
 	limits: (
-		max_steps: 10000,
+		max_steps: 4000,
 		update_weight: 0.01,
 	),
-	boundary: Dead,
+	boundary: Wrap,
 )
