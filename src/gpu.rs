@@ -213,6 +213,39 @@ struct CaStepData {
     keep_table: blade_graphics::BufferPiece,
 }
 
+/// Shared GPU device + compiled pipeline. Multiple `GpuSimulator` instances
+/// can share one `GpuContext` (via `Rc`) to avoid creating redundant Vulkan
+/// devices on the screener thread.
+pub struct GpuContext {
+    inner: blade_graphics::Context,
+    pipeline: blade_graphics::ComputePipeline,
+}
+
+impl GpuContext {
+    /// # Panics
+    /// Panics if GPU context creation or shader compilation fails.
+    pub fn new() -> Self {
+        let inner = unsafe {
+            blade_graphics::Context::init(blade_graphics::ContextDesc {
+                presentation: false,
+                ..Default::default()
+            })
+            .expect("Failed to create GPU context")
+        };
+        let shader = inner.create_shader(blade_graphics::ShaderDesc {
+            source: CA_STEP_WGSL,
+        });
+        let layout = CaStepData::layout();
+        let pipeline =
+            inner.create_compute_pipeline(blade_graphics::ComputePipelineDesc {
+                name: "ca_step",
+                data_layouts: &[&layout],
+                compute: shader.at("ca_step"),
+            });
+        Self { inner, pipeline }
+    }
+}
+
 /// GPU batch simulator.
 ///
 /// Supports deterministic B3/S23 (rule_mode 0) and table-driven probabilistic
@@ -220,7 +253,7 @@ struct CaStepData {
 /// and fitness evaluation.
 pub struct GpuSimulator {
     pub config: GpuBatchConfig,
-    context: blade_graphics::Context,
+    ctx: std::rc::Rc<GpuContext>,
     grids_a: blade_graphics::Buffer,
     grids_b: blade_graphics::Buffer,
     alive_counts_buf: blade_graphics::Buffer,
@@ -228,7 +261,6 @@ pub struct GpuSimulator {
     region_alive_buf: blade_graphics::Buffer,
     spawn_table_buf: blade_graphics::Buffer,
     keep_table_buf: blade_graphics::Buffer,
-    pipeline: blade_graphics::ComputePipeline,
     ping: bool,
     total_steps: u32,
     encoder: blade_graphics::CommandEncoder,
@@ -236,18 +268,19 @@ pub struct GpuSimulator {
 }
 
 impl GpuSimulator {
-    /// Create a new GPU simulator.
+    /// Create a new GPU simulator with its own dedicated context.
     ///
     /// # Panics
     /// Panics if GPU context creation or shader compilation fails.
     pub fn new(config: GpuBatchConfig) -> Self {
-        let context = unsafe {
-            blade_graphics::Context::init(blade_graphics::ContextDesc {
-                presentation: false,
-                ..Default::default()
-            })
-            .expect("Failed to create GPU context")
-        };
+        Self::with_context(std::rc::Rc::new(GpuContext::new()), config)
+    }
+
+    /// Create a new GPU simulator sharing an existing context.
+    /// Use this when running multiple simulators (e.g. the screener)
+    /// to avoid redundant Vulkan device creation.
+    pub fn with_context(ctx: std::rc::Rc<GpuContext>, config: GpuBatchConfig) -> Self {
+        let context = &ctx.inner;
 
         let words_per_grid = config.words_per_grid();
         let total_grid_bytes = (words_per_grid * config.num_grids as usize * 4) as u64;
@@ -291,7 +324,6 @@ impl GpuSimulator {
             memory: blade_graphics::Memory::Shared,
         });
 
-        // Upload rule tables
         unsafe {
             let spawn_ptr =
                 std::slice::from_raw_parts_mut(spawn_table_buf.data() as *mut f32, RULE_TABLE_SIZE);
@@ -301,17 +333,6 @@ impl GpuSimulator {
             keep_ptr.copy_from_slice(&config.keep_table);
         }
 
-        let shader = context.create_shader(blade_graphics::ShaderDesc {
-            source: CA_STEP_WGSL,
-        });
-        let layout = CaStepData::layout();
-        let pipeline =
-            context.create_compute_pipeline(blade_graphics::ComputePipelineDesc {
-                name: "ca_step",
-                data_layouts: &[&layout],
-                compute: shader.at("ca_step"),
-            });
-
         let encoder =
             context.create_command_encoder(blade_graphics::CommandEncoderDesc {
                 name: "ca_step",
@@ -320,7 +341,7 @@ impl GpuSimulator {
 
         Self {
             config,
-            context,
+            ctx,
             grids_a,
             grids_b,
             alive_counts_buf,
@@ -328,7 +349,6 @@ impl GpuSimulator {
             region_alive_buf,
             spawn_table_buf,
             keep_table_buf,
-            pipeline,
             ping: false,
             total_steps: 0,
             encoder,
@@ -411,7 +431,7 @@ impl GpuSimulator {
             }
             {
                 let mut pass = self.encoder.compute("ca_step");
-                let mut pc = pass.with(&self.pipeline);
+                let mut pc = pass.with(&self.ctx.pipeline);
                 pc.bind(
                     0,
                     &CaStepData {
@@ -430,15 +450,15 @@ impl GpuSimulator {
             self.ping = !self.ping;
             self.total_steps += 1;
         }
-        let sp = self.context.submit(&mut self.encoder);
-        self.context.wait_for(&sp, !0);
+        let sp = self.ctx.inner.submit(&mut self.encoder);
+        self.ctx.inner.wait_for(&sp, !0);
         self.sync_point = Some(sp);
     }
 
     /// Screen a batch of packed grids: run `total_steps`, reading stats back
     /// every `interval` steps, and produce a cheap interestingness score per
-    /// grid. This is the fast level-1/2 filter of the multi-fidelity funnel;
-    /// survivors should be re-simulated on CPU for full instrumentation.
+    /// grid. Grids that go extinct or saturate are zeroed early so subsequent
+    /// steps skip them (Phase 3 early discard).
     pub fn screen(
         &mut self,
         packed: &[Vec<u32>],
@@ -450,13 +470,22 @@ impl GpuSimulator {
         let total_cells = self.config.total_cells();
         let interval = interval.max(1);
         let mut histories: Vec<Vec<GridStats>> = vec![Vec::new(); count];
+        let mut dead: Vec<bool> = vec![false; count];
         let mut done = 0usize;
         while done < total_steps {
             let n = interval.min(total_steps - done);
             self.step(n);
             let stats = self.readback_stats();
-            for (history, stat) in histories.iter_mut().zip(stats.into_iter()) {
-                history.push(stat);
+            for (i, stat) in stats.into_iter().enumerate() {
+                if i < count && !dead[i] {
+                    let dominated = stat.alive_count == 0
+                        || stat.alive_ratio(total_cells) > 0.9;
+                    histories[i].push(stat);
+                    if dominated {
+                        dead[i] = true;
+                        self.zero_grid(i);
+                    }
+                }
             }
             done += n;
         }
@@ -464,6 +493,25 @@ impl GpuSimulator {
             .iter()
             .map(|h| score_history(h, total_cells))
             .collect()
+    }
+
+    /// Zero a specific grid's data in both ping-pong buffers so it stays
+    /// dead in all subsequent steps (no births from a zeroed grid).
+    fn zero_grid(&mut self, grid_index: usize) {
+        let words_per_grid = self.config.words_per_grid();
+        let offset = grid_index * words_per_grid;
+        unsafe {
+            let buf_a = std::slice::from_raw_parts_mut(
+                (self.grids_a.data() as *mut u32).add(offset),
+                words_per_grid,
+            );
+            buf_a.fill(0);
+            let buf_b = std::slice::from_raw_parts_mut(
+                (self.grids_b.data() as *mut u32).add(offset),
+                words_per_grid,
+            );
+            buf_b.fill(0);
+        }
     }
 
     /// Read back per-grid statistics from GPU.
@@ -495,16 +543,16 @@ impl GpuSimulator {
 impl Drop for GpuSimulator {
     fn drop(&mut self) {
         if let Some(sp) = self.sync_point.take() {
-            self.context.wait_for(&sp, !0);
+            self.ctx.inner.wait_for(&sp, !0);
         }
-        self.context.destroy_command_encoder(&mut self.encoder);
-        self.context.destroy_buffer(self.grids_a);
-        self.context.destroy_buffer(self.grids_b);
-        self.context.destroy_buffer(self.alive_counts_buf);
-        self.context.destroy_buffer(self.birth_counts_buf);
-        self.context.destroy_buffer(self.region_alive_buf);
-        self.context.destroy_buffer(self.spawn_table_buf);
-        self.context.destroy_buffer(self.keep_table_buf);
+        self.ctx.inner.destroy_command_encoder(&mut self.encoder);
+        self.ctx.inner.destroy_buffer(self.grids_a);
+        self.ctx.inner.destroy_buffer(self.grids_b);
+        self.ctx.inner.destroy_buffer(self.alive_counts_buf);
+        self.ctx.inner.destroy_buffer(self.birth_counts_buf);
+        self.ctx.inner.destroy_buffer(self.region_alive_buf);
+        self.ctx.inner.destroy_buffer(self.spawn_table_buf);
+        self.ctx.inner.destroy_buffer(self.keep_table_buf);
     }
 }
 
@@ -828,6 +876,43 @@ mod tests {
             results[0], results[1],
             "Two identical grids must evolve differently under probabilistic rules \
              (Philox RNG seeded by grid_idx)"
+        );
+    }
+
+    /// Early discard: an empty grid gets score 0 and a grid that goes
+    /// extinct mid-screen is zeroed so it doesn't waste subsequent steps.
+    #[test]
+    fn screen_early_discard() {
+        const W: i32 = 16;
+        const H: i32 = 16;
+        let mut sim = GpuSimulator::new(GpuBatchConfig::b3s23(
+            W as u32, H as u32, 4, 2, BoundaryMode::Wrap,
+        ));
+
+        // Grid 0: single isolated cell — dies immediately under B3/S23.
+        let mut doomed = Grid::new(Coordinates { x: W, y: H });
+        doomed.init(8, 8);
+
+        // Grid 1: R-pentomino — survives many steps.
+        let mut rpent = Grid::new(Coordinates { x: W, y: H });
+        for &(x, y) in &[(8, 7), (9, 7), (7, 8), (8, 8), (8, 9)] {
+            rpent.init(x, y);
+        }
+
+        let outcomes = sim.screen(
+            &[pack_grid(&doomed), pack_grid(&rpent)],
+            100,
+            20,
+        );
+
+        assert_eq!(outcomes[0].score, 0.0, "doomed grid should be discarded");
+        assert!(outcomes[1].score > 0.0, "R-pentomino should survive");
+
+        // After screening, the doomed grid should be zeroed in both buffers
+        let grids = sim.readback_grids();
+        assert!(
+            grids[0].iter().all(|&w| w == 0),
+            "extinct grid should be zeroed after early discard"
         );
     }
 

@@ -146,10 +146,6 @@ track classified-cell coverage and component independence.
 
 ### Known remaining issues
 - `avg_velocity` cell field computed but unused — 16 bytes/cell overhead
-- Screener thread creates one blade Context per (size, boundary) combination;
-  should share a single Context across GpuSimulators
-- GPU screening uses fixed steps per candidate; no GPU-side early discard yet
-  (Phase 3)
 
 ### Previously fixed (from original analysis)
 - ~~Fitness function is coarse~~ → composite fitness with level 2-6 signals
@@ -192,11 +188,15 @@ track classified-cell coverage and component independence.
   (per-grid RNG seeding).
 - `GpuBatchConfig::b3s23()` convenience constructor for existing callers.
 
-### Remaining work
+### Phase 3: Complete
+- Early discard during screening: after each interval readback, grids that
+  went extinct (alive=0) or saturated (>90%) are zeroed in both ping-pong
+  buffers so subsequent steps skip them (no live cells → no output).
+- `GpuContext` shared across screener simulators: one Vulkan device instead
+  of one per (width, height, boundary) combination. `GpuSimulator::with_context`
+  accepts `Rc<GpuContext>` for sharing.
 
-**Phase 3: GPU-side early discard**:
-- Readback alive counts every ~500 steps, zero boring grids
-- Requires batched submission (Phase 1 fix) to amortize readback cost
+### Remaining work
 
 **Phase 4: GPU-side analysis**:
 - Parallel connected components (label propagation or union-find)

@@ -923,16 +923,17 @@ impl Laboratory {
 
 }
 
-/// GPU candidate screening: a dedicated thread owning `GpuSimulator`
-/// instances (one per grid size + boundary combination), fed batches of
-/// candidate snaps and returning cheap interestingness scores.
+/// GPU candidate screening: a dedicated thread sharing a single `GpuContext`
+/// across `GpuSimulator` instances (one per grid size + boundary combination),
+/// fed batches of candidate snaps and returning cheap interestingness scores.
 #[cfg(feature = "gpu")]
 mod screen {
     use super::GpuScreenConfig;
-    use crate::gpu::{pack_grid, GpuBatchConfig, GpuSimulator};
+    use crate::gpu::{pack_grid, GpuBatchConfig, GpuContext, GpuSimulator};
     use crate::grid::BoundaryMode;
     use crate::sim::Snap;
     use std::collections::HashMap;
+    use std::rc::Rc;
 
     /// A mutated snap awaiting GPU screening.
     pub struct Candidate {
@@ -958,12 +959,12 @@ mod screen {
         pub fn new(config: GpuScreenConfig) -> Self {
             let (sender, candidate_rx) = crossbeam_channel::unbounded::<Vec<Candidate>>();
             let (result_tx, receiver) = crossbeam_channel::unbounded();
-            // The thread exits when the Laboratory (and thus `sender`) drops.
             std::thread::spawn(move || {
+                let gpu_ctx = Rc::new(GpuContext::new());
                 let mut simulators: HashMap<(i32, i32, BoundaryMode), GpuSimulator> =
                     HashMap::new();
                 while let Ok(batch) = candidate_rx.recv() {
-                    let results = screen_batch(&mut simulators, &config, batch);
+                    let results = screen_batch(&gpu_ctx, &mut simulators, &config, batch);
                     if result_tx.send(results).is_err() {
                         return;
                     }
@@ -978,12 +979,11 @@ mod screen {
     }
 
     fn screen_batch(
+        gpu_ctx: &Rc<GpuContext>,
         simulators: &mut HashMap<(i32, i32, BoundaryMode), GpuSimulator>,
         config: &GpuScreenConfig,
         batch: Vec<Candidate>,
     ) -> Vec<Screened> {
-        // Group candidates by grid dimensions + boundary: each GPU batch
-        // must share them.
         let mut groups: HashMap<(i32, i32, BoundaryMode), Vec<(Candidate, Vec<u32>)>> =
             HashMap::new();
         for candidate in batch {
@@ -1007,13 +1007,16 @@ mod screen {
             let simulator = simulators
                 .entry((width, height, boundary))
                 .or_insert_with(|| {
-                    GpuSimulator::new(GpuBatchConfig::b3s23(
-                        width as u32,
-                        height as u32,
-                        config.interval as u32,
-                        config.batch as u32,
-                        boundary,
-                    ))
+                    GpuSimulator::with_context(
+                        Rc::clone(gpu_ctx),
+                        GpuBatchConfig::b3s23(
+                            width as u32,
+                            height as u32,
+                            config.interval as u32,
+                            config.batch as u32,
+                            boundary,
+                        ),
+                    )
                 });
             while !members.is_empty() {
                 let take = members.len().min(config.batch);
