@@ -1,0 +1,12 @@
+(
+    max_active: 10,
+    max_in_flight: 40,
+    max_archive: 300,
+    size_power: (start: 6, end: 8),
+    probability_step: 0.05,
+    max_probability_weight: 8,
+    frozen_rules: false,
+    // No GPU screening: each candidate may have different rules,
+    // so batching is ineffective. Mean-field pre-filter handles the
+    // cheap rejection of trivially boring rules instead.
+)
