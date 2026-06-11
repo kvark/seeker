@@ -5,4 +5,5 @@ pub mod gpu;
 pub mod lab;
 pub mod narrative;
 pub mod render;
+pub mod rules;
 pub mod sim;
