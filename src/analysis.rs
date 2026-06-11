@@ -337,10 +337,11 @@ fn bbox_chebyshev_distance(
 
 /// Merge connected components into constellations.
 ///
-/// Components whose bounding boxes have Chebyshev distance < 2 are merged,
-/// since they are within the Moore neighborhood interaction range.  This allows
-/// multi-component patterns like pulsars (48 cells, period 3) to be classified
-/// as a single unit — matching how apgsearch handles "pseudo-objects".
+/// Components whose bounding boxes have Chebyshev distance <= 2 are merged.
+/// Distance 2 means a birth in the 1-cell gap between components is possible
+/// (a cell can have neighbors in both components). This allows multi-component
+/// patterns like pulsars (48 cells, period 3) to be classified as a single
+/// unit — matching how apgsearch handles "pseudo-objects".
 ///
 /// Returns a list of merged cell groups (constellations).
 fn merge_constellations(components: &[Vec<Coordinates>]) -> Vec<Vec<Coordinates>> {
@@ -383,7 +384,7 @@ fn merge_constellations(components: &[Vec<Coordinates>]) -> Vec<Vec<Coordinates>
     // Merge components with Chebyshev distance < 2 between bounding boxes
     for i in 0..n {
         for j in (i + 1)..n {
-            if bbox_chebyshev_distance(bboxes[i], bboxes[j]) < 2 {
+            if bbox_chebyshev_distance(bboxes[i], bboxes[j]) <= 2 {
                 union(&mut parent, &mut rank, i, j);
             }
         }
@@ -494,7 +495,7 @@ pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary, Vec<Vec
         let mut independent = true;
         'outer: for i in 0..classified_bboxes.len() {
             for j in (i + 1)..classified_bboxes.len() {
-                if bbox_chebyshev_distance(classified_bboxes[i], classified_bboxes[j]) < 2 {
+                if bbox_chebyshev_distance(classified_bboxes[i], classified_bboxes[j]) <= 2 {
                     independent = false;
                     break 'outer;
                 }
@@ -506,4 +507,57 @@ pub fn analyze_grid(grid: &Grid) -> (Vec<PatternClass>, AnalysisSummary, Vec<Vec
     };
 
     (patterns, summary, components)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::Grid;
+
+    #[test]
+    fn glider_classified_as_spaceship() {
+        // .O.
+        // ..O
+        // OOO
+        let mut grid = Grid::new(Coordinates { x: 32, y: 32 });
+        grid.init(16, 15);
+        grid.init(17, 16);
+        grid.init(15, 17);
+        grid.init(16, 17);
+        grid.init(17, 17);
+
+        let (patterns, summary, _) = analyze_grid(&grid);
+        assert_eq!(patterns.len(), 1);
+        assert!(matches!(patterns[0], PatternClass::Spaceship { period: 4, cells: 5 }));
+        assert_eq!(summary.spaceships, vec![4]);
+        assert!(summary.named_patterns.contains(&"glider"));
+    }
+
+    #[test]
+    fn pulsar_classified_as_oscillator() {
+        // Pulsar: period-3, 48 cells, symmetric. Place it centered on a grid.
+        let mut grid = Grid::new(Coordinates { x: 32, y: 32 });
+        let cx = 16i32;
+        let cy = 16i32;
+        // A pulsar has 4 symmetric arms. The canonical form:
+        // Relative coordinates (one quadrant, then mirror 4 ways)
+        let quadrant = [
+            (1, 2), (1, 3), (1, 4),
+            (2, 1), (3, 1), (4, 1),
+            (2, 6), (3, 6), (4, 6),
+            (6, 2), (6, 3), (6, 4),
+        ];
+        for &(dx, dy) in &quadrant {
+            grid.init(cx + dx, cy + dy);
+            grid.init(cx - dx, cy + dy);
+            grid.init(cx + dx, cy - dy);
+            grid.init(cx - dx, cy - dy);
+        }
+
+        let (patterns, summary, _) = analyze_grid(&grid);
+        // Should be one merged constellation classified as oscillator
+        let osc_count: usize = patterns.iter().filter(|p| matches!(p, PatternClass::Oscillator { .. })).count();
+        assert!(osc_count >= 1, "Expected pulsar to be classified as oscillator, got {:?}", patterns);
+        assert!(summary.oscillators.contains(&3), "Expected period 3, got {:?}", summary.oscillators);
+    }
 }
