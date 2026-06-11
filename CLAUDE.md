@@ -47,6 +47,7 @@ landscape.
 - `src/analysis.rs` — Post-stabilization pattern classification (still lifes, oscillators, spaceships) via connected components
 - `src/narrative.rs` — Event tracking (splits, merges, births, deaths) for Level 4 measurement
 - `src/gpu.rs` — Batch CA simulation on GPU via blade-graphics compute shaders
+- `src/rules.rs` — Rule-space analysis: mean-field pre-filter, known rule tables, Bn/Sm parsing
 - `src/main.rs` — CLI modes: play (TUI), find (TUI), headless, replay
 
 ## How the Search Works
@@ -242,9 +243,9 @@ CPU (lab.rs)                          GPU (blade compute)
 3. ~~Table-driven rules + Philox RNG in shader (Phase 2)~~ done
 
 ### Phase C: Rule-space exploration
-1. Mean-field pre-filter: analytically discard rules with trivial fixed points
+1. ~~Mean-field pre-filter: analytically discard rules with trivial fixed points~~ done
 2. MAP-Elites over rule space: genome = spawn/keep/kernel, behavior = ladder scores
-3. Landmarks: verify B3/S23, HighLife, Seeds, Day & Night score as expected
+3. ~~Landmarks: verify B3/S23, HighLife, Seeds, Day & Night score as expected~~ done
 4. Interpolation: are "supports life" regions connected or isolated islands?
 
 ### Phase D: Rule-agnostic emergence metrics
