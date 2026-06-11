@@ -247,6 +247,7 @@ pub fn classify_component(cells: &[Coordinates]) -> PatternClass {
 
     let initial_hash = normalized_hash(&grid);
     let initial_com = center_of_mass(&grid).unwrap();
+    let mut min_cells = cells.len();
 
     // Run up to 180 steps looking for the pattern to return.
     // Needs to exceed common periods: pentadecathlon (15), pulsar (3),
@@ -254,9 +255,11 @@ pub fn classify_component(cells: &[Coordinates]) -> PatternClass {
     for step in 1..=180 {
         grid = gol_step(&grid);
 
-        if grid.alive_count() == 0 {
+        let alive = grid.alive_count();
+        if alive == 0 {
             return PatternClass::Extinct;
         }
+        min_cells = min_cells.min(alive);
 
         let hash = normalized_hash(&grid);
         if hash == initial_hash {
@@ -269,13 +272,13 @@ pub fn classify_component(cells: &[Coordinates]) -> PatternClass {
                 } else {
                     return PatternClass::Oscillator {
                         period: step,
-                        cells: cells.len(),
+                        cells: min_cells,
                     };
                 }
             } else {
                 return PatternClass::Spaceship {
                     period: step,
-                    cells: cells.len(),
+                    cells: min_cells,
                 };
             }
         }
@@ -300,11 +303,11 @@ pub fn name_pattern(_hash: u64, class: &PatternClass) -> Option<&'static str> {
         PatternClass::Oscillator { period: 2, cells: 6 } => Some("toad/beacon"),
         PatternClass::Oscillator { period: 2, cells: 8 } => Some("beacon"),
         PatternClass::Oscillator { period: 3, cells: 48 } => Some("pulsar"),
-        PatternClass::Oscillator { period: 15, cells } if *cells >= 12 && *cells <= 18 => Some("pentadecathlon"),
+        PatternClass::Oscillator { period: 15, cells: 12 } => Some("pentadecathlon"),
         PatternClass::Spaceship { period: 4, cells: 5 } => Some("glider"),
         PatternClass::Spaceship { period: 4, cells: 9 } => Some("LWSS"),
-        PatternClass::Spaceship { period: 4, cells: 13 } => Some("MWSS"),
-        PatternClass::Spaceship { period: 4, cells: 17 } => Some("HWSS"),
+        PatternClass::Spaceship { period: 4, cells: 11 } => Some("MWSS"),
+        PatternClass::Spaceship { period: 4, cells: 13 } => Some("HWSS"),
         _ => None,
     }
 }
