@@ -45,6 +45,7 @@ landscape.
 - `src/sim.rs` — Simulation engine: probabilistic CA rules, compiled kernel fast path, period detection, transient analysis
 - `src/lab.rs` — Evolutionary search: MAP-Elites quality-diversity, parallel experiments via Choir
 - `src/analysis.rs` — Post-stabilization pattern classification (still lifes, oscillators, spaceships) via connected components
+- `src/emergence.rs` — Rule-agnostic emergence metrics: Derrida damage-spreading, spacetime complexity, shift cross-correlation, rule transects
 - `src/narrative.rs` — Event tracking (splits, merges, births, deaths) for Level 4 measurement
 - `src/gpu.rs` — Batch CA simulation on GPU via blade-graphics compute shaders
 - `src/rules.rs` — Rule-space analysis: mean-field pre-filter, known rule tables, Bn/Sm parsing
@@ -130,6 +131,11 @@ track classified-cell coverage and component independence.
 - Batch spawning fills all available worker slots
 - ~31% MAP-Elites coverage on 128×128, fitness 253-257, up to 25 transient gliders
 - GPU shader compiles and passes tests on lavapipe
+- Rule-agnostic emergence metrics (Derrida, spacetime complexity, shift correlation)
+  wired into simulation loop, fitness function, and headless output
+- Rule transect sweeps (examples/transect.rs): GoL spreading_rate ≈ 1.098 confirms
+  near-critical behavior; HighLife ≈ 1.108 (slightly more chaotic)
+- Rule-space search with emergence-aware fitness reaches 42% MAP-Elites coverage
 
 ### Detector calibration gaps (blocking rule-space exploration)
 1. **Pulsar recognition**: `name_pattern` says 12 cells but a pulsar has 48 cells
@@ -244,12 +250,19 @@ CPU (lab.rs)                          GPU (blade compute)
 
 ### Phase C: Rule-space exploration
 1. ~~Mean-field pre-filter: analytically discard rules with trivial fixed points~~ done
-2. MAP-Elites over rule space: genome = spawn/keep/kernel, behavior = ladder scores
+2. ~~MAP-Elites over rule space: genome = spawn/keep/kernel, behavior = ladder scores~~ done
 3. ~~Landmarks: verify B3/S23, HighLife, Seeds, Day & Night score as expected~~ done
-4. Interpolation: are "supports life" regions connected or isolated islands?
+4. ~~Interpolation: are "supports life" regions connected or isolated islands?~~ done (rule_transect)
 
 ### Phase D: Rule-agnostic emergence metrics
-1. Damage spreading (Derrida): twin grids, 1-cell perturbation, track Hamming divergence
-2. Compression complexity: zstd ratio of spacetime blocks
-3. Shift cross-correlation: detect translating structures without rule-specific classification
+1. ~~Damage spreading (Derrida): twin grids, 1-cell perturbation, track Hamming divergence~~ done
+2. ~~Spacetime complexity: Shannon entropy of block densities + temporal autocorrelation~~ done
+3. ~~Shift cross-correlation: detect translating structures without rule-specific classification~~ done
 4. Stimulus-response: perturb stabilized system, measure response locality
+
+### Phase E: Critical surface mapping (next)
+1. High-resolution transects between more rule pairs (finer t steps, larger grids)
+2. 2D slices through rule space (e.g., vary spawn[2] × spawn[3] with fixed keep)
+3. Multi-seed averaging for Derrida to reduce noise
+4. Probabilistic rule stepping in transects (RNG-based, not threshold-based)
+5. Identify and catalog critical-surface rules with Derrida ≈ 1.0
