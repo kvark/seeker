@@ -713,28 +713,35 @@ pub fn rule_transect_cfg(
 ) -> Vec<TransectPoint> {
     use crate::rules;
 
-    let mut results = Vec::with_capacity(num_points);
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let indices: Vec<usize> = (0..num_points).collect();
 
-    for i in 0..num_points {
-        let t = i as f32 / (num_points - 1).max(1) as f32;
-        let (spawn, keep) = interpolate_rules(spawn_a, keep_a, spawn_b, keep_b, t);
-
-        let mf = match rules::mean_field_classify(&spawn, &keep) {
-            rules::MeanFieldClass::Stable(rho) => rho,
-            rules::MeanFieldClass::Decays => 0.0,
-            rules::MeanFieldClass::Grows => 1.0,
-        };
-
-        let (derrida, complexity, alive_ratio) = measure_rule(&spawn, &keep, cfg, seed);
-
-        results.push(TransectPoint {
-            t,
-            derrida,
-            complexity,
-            mean_field: mf,
-            alive_ratio,
-        });
-    }
+    let results: Vec<TransectPoint> = std::thread::scope(|s| {
+        let chunks: Vec<_> = indices.chunks(indices.len().div_ceil(num_threads)).collect();
+        let handles: Vec<_> = chunks.into_iter().map(|chunk| {
+            let cfg = &cfg;
+            s.spawn(move || {
+                let mut results = Vec::with_capacity(chunk.len());
+                for &i in chunk {
+                    let t = i as f32 / (num_points - 1).max(1) as f32;
+                    let (spawn, keep) = interpolate_rules(spawn_a, keep_a, spawn_b, keep_b, t);
+                    let mf = match rules::mean_field_classify(&spawn, &keep) {
+                        rules::MeanFieldClass::Stable(rho) => rho,
+                        rules::MeanFieldClass::Decays => 0.0,
+                        rules::MeanFieldClass::Grows => 1.0,
+                    };
+                    let (derrida, complexity, alive_ratio) = measure_rule(&spawn, &keep, cfg, seed);
+                    results.push((i, TransectPoint { t, derrida, complexity, mean_field: mf, alive_ratio }));
+                }
+                results
+            })
+        }).collect();
+        let mut all: Vec<_> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        all.sort_by_key(|(idx, _)| *idx);
+        all.into_iter().map(|(_, p)| p).collect()
+    });
 
     results
 }
@@ -765,45 +772,64 @@ pub fn rule_slice_2d(
     seed: u64,
     cfg: &TransectConfig,
 ) -> Vec<SlicePoint> {
-    let mut results = Vec::with_capacity(resolution * resolution);
+    let coords: Vec<(usize, usize)> = (0..resolution)
+        .flat_map(|yi| (0..resolution).map(move |xi| (yi, xi)))
+        .collect();
 
-    for yi in 0..resolution {
-        let y_val = yi as f32 / (resolution - 1).max(1) as f32;
-        for xi in 0..resolution {
-            let x_val = xi as f32 / (resolution - 1).max(1) as f32;
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
-            let mut spawn = *base_spawn;
-            let mut keep = *base_keep;
+    let results: Vec<SlicePoint> = std::thread::scope(|s| {
+        let chunks: Vec<_> = coords.chunks(coords.len().div_ceil(num_threads)).collect();
+        let handles: Vec<_> = chunks.into_iter().map(|chunk| {
+            let base_spawn = base_spawn;
+            let base_keep = base_keep;
+            let cfg = &cfg;
+            s.spawn(move || {
+                let mut results = Vec::with_capacity(chunk.len());
+                for &(yi, xi) in chunk {
+                    let x_val = xi as f32 / (resolution - 1).max(1) as f32;
+                    let y_val = yi as f32 / (resolution - 1).max(1) as f32;
 
-            if x_index < 9 {
-                spawn[x_index] = x_val;
-            } else {
-                keep[x_index - 9] = x_val;
-            }
-            if y_index < 9 {
-                spawn[y_index] = y_val;
-            } else {
-                keep[y_index - 9] = y_val;
-            }
+                    let mut spawn = *base_spawn;
+                    let mut keep = *base_keep;
 
-            let mf = match crate::rules::mean_field_classify(&spawn, &keep) {
-                crate::rules::MeanFieldClass::Stable(rho) => rho,
-                crate::rules::MeanFieldClass::Decays => 0.0,
-                crate::rules::MeanFieldClass::Grows => 1.0,
-            };
+                    if x_index < 9 {
+                        spawn[x_index] = x_val;
+                    } else {
+                        keep[x_index - 9] = x_val;
+                    }
+                    if y_index < 9 {
+                        spawn[y_index] = y_val;
+                    } else {
+                        keep[y_index - 9] = y_val;
+                    }
 
-            let (derrida, complexity, alive_ratio) = measure_rule(&spawn, &keep, cfg, seed);
+                    let mf = match crate::rules::mean_field_classify(&spawn, &keep) {
+                        crate::rules::MeanFieldClass::Stable(rho) => rho,
+                        crate::rules::MeanFieldClass::Decays => 0.0,
+                        crate::rules::MeanFieldClass::Grows => 1.0,
+                    };
 
-            results.push(SlicePoint {
-                x_param: x_val,
-                y_param: y_val,
-                derrida,
-                complexity,
-                mean_field: mf,
-                alive_ratio,
-            });
-        }
-    }
+                    let (derrida, complexity, alive_ratio) = measure_rule(&spawn, &keep, cfg, seed);
+
+                    results.push((yi * resolution + xi, SlicePoint {
+                        x_param: x_val,
+                        y_param: y_val,
+                        derrida,
+                        complexity,
+                        mean_field: mf,
+                        alive_ratio,
+                    }));
+                }
+                results
+            })
+        }).collect();
+        let mut all: Vec<_> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        all.sort_by_key(|(idx, _)| *idx);
+        all.into_iter().map(|(_, p)| p).collect()
+    });
 
     results
 }
@@ -834,13 +860,18 @@ pub fn find_critical_rules(
     use rand::Rng;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let mut critical = Vec::new();
 
+    // Phase 1: generate candidates and pre-filter (fast, sequential)
+    struct Candidate {
+        spawn: [f32; 9],
+        keep: [f32; 9],
+        mean_field: f64,
+        measure_seed: u64,
+    }
+    let mut candidates = Vec::new();
     for _ in 0..num_samples {
         let mut spawn = [0.0f32; 9];
         let mut keep = [0.0f32; 9];
-
-        // Generate random rule biased toward sparse spawn, moderate keep
         for k in 0..9usize {
             if rng.gen::<f32>() < 0.3 {
                 spawn[k] = rng.gen::<f32>();
@@ -849,29 +880,54 @@ pub fn find_critical_rules(
                 keep[k] = rng.gen::<f32>();
             }
         }
-
-        // Mean-field pre-filter
         let mf = rules::mean_field_classify(&spawn, &keep);
         let mf_val = match mf {
             rules::MeanFieldClass::Stable(rho) => rho,
             rules::MeanFieldClass::Decays | rules::MeanFieldClass::Grows => continue,
         };
-
-        let (derrida, complexity, alive) = measure_rule(&spawn, &keep, cfg, rng.gen());
-
-        if derrida.spreading_rate > 0.0 && alive > 0.001 {
-            let cs = derrida.criticality_score();
-            critical.push(CriticalRule {
-                spawn,
-                keep,
-                spreading_rate: derrida.spreading_rate,
-                criticality_score: cs,
-                complexity: complexity.complexity,
-                alive_ratio: alive,
-                mean_field: mf_val,
-            });
-        }
+        candidates.push(Candidate { spawn, keep, mean_field: mf_val, measure_seed: rng.gen() });
     }
+
+    eprintln!("  {}/{} candidates pass mean-field filter, measuring...",
+        candidates.len(), num_samples);
+
+    // Phase 2: measure in parallel
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let total = candidates.len();
+
+    let mut critical: Vec<CriticalRule> = std::thread::scope(|s| {
+        let chunks: Vec<_> = candidates.chunks(candidates.len().div_ceil(num_threads)).collect();
+        let handles: Vec<_> = chunks.into_iter().map(|chunk| {
+            let cfg = &cfg;
+            let done = &done;
+            s.spawn(move || {
+                let mut results = Vec::new();
+                for c in chunk {
+                    let (derrida, complexity, alive) = measure_rule(&c.spawn, &c.keep, cfg, c.measure_seed);
+                    let finished = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if total >= 100 && finished % (total / 10) == 0 {
+                        eprintln!("  [{}/{}] measured", finished, total);
+                    }
+                    if derrida.spreading_rate > 0.0 && alive > 0.001 {
+                        results.push(CriticalRule {
+                            spawn: c.spawn,
+                            keep: c.keep,
+                            spreading_rate: derrida.spreading_rate,
+                            criticality_score: derrida.criticality_score(),
+                            complexity: complexity.complexity,
+                            alive_ratio: alive,
+                            mean_field: c.mean_field,
+                        });
+                    }
+                }
+                results
+            })
+        }).collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
 
     critical.sort_by(|a, b| b.criticality_score.cmp(&a.criticality_score));
     critical
