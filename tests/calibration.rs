@@ -198,7 +198,50 @@ fn r_pentomino_narrative() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Gosper glider gun emergence calibration
+// Test 2: Rule transect B3/S23 → B36/S23 (GoL → HighLife)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gol_to_highlife_transect() {
+    use seeker::emergence::rule_transect;
+    use seeker::rules;
+
+    let (spawn_a, keep_a) = rules::b3s23();
+    let (spawn_b, keep_b) = rules::b36s23();
+
+    let points = rule_transect(&spawn_a, &keep_a, &spawn_b, &keep_b, 11, 32, 500, 42);
+
+    println!("GoL → HighLife transect (11 points):");
+    println!("  t    | Derrida λ | Spreading | Criticality | Complexity | Entropy | MeanField | Alive");
+    println!("-------|-----------|-----------|-------------|------------|---------|-----------|------");
+    for p in &points {
+        println!(
+            "  {:.2}  |    {:.3}   |   {:.3}    |     {:3}     |    {:.1}     |  {:.3}  |   {:.3}   | {:.3}",
+            p.t, p.derrida.lambda, p.derrida.spreading_rate,
+            p.derrida.criticality_score(), p.complexity.complexity,
+            p.complexity.entropy, p.mean_field, p.alive_ratio
+        );
+    }
+
+    // GoL (t=0.0) should have non-zero Derrida activity
+    let gol = &points[0];
+    assert!(
+        gol.derrida.initial_damage > 0 || gol.alive_ratio == 0.0,
+        "GoL should have measurable Derrida damage or the soup went extinct"
+    );
+
+    // At least one point along the transect should show critical behavior
+    let has_critical = points
+        .iter()
+        .any(|p| p.derrida.spreading_rate > 0.5 && p.derrida.spreading_rate < 2.0 && p.derrida.initial_damage > 0);
+    assert!(
+        has_critical,
+        "At least one transect point should show near-critical Derrida behavior"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: Gosper glider gun emergence calibration
 // ---------------------------------------------------------------------------
 
 #[test]

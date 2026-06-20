@@ -25,6 +25,7 @@ pub struct Cell {
     pub avg_velocity: [f32; 2],
 }
 
+#[derive(Clone)]
 pub struct Grid {
     size: Coordinates,
     boundary: BoundaryMode,

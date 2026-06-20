@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod emergence;
 pub mod grid;
 #[cfg(feature = "gpu")]
 pub mod gpu;
