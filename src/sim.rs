@@ -344,6 +344,12 @@ pub struct Statistics {
     pub transient_pattern_name_count: usize,
     /// Highest oscillator period seen during transient or final analysis.
     pub max_oscillator_period: usize,
+    /// Derrida damage-spreading measurement (rule-agnostic phase classification).
+    pub derrida: crate::emergence::DerridaResult,
+    /// Spacetime complexity measurement (entropy + autocorrelation).
+    pub complexity: crate::emergence::ComplexityResult,
+    /// Shift cross-correlation for translating structure detection.
+    pub shift: crate::emergence::ShiftResult,
 }
 
 pub enum Conclusion {
@@ -424,6 +430,10 @@ pub struct Simulation {
     /// Each hash encodes the ship's normalized shape + coarse grid quadrant,
     /// so the same glider observed at different sample steps isn't double-counted.
     seen_ships: FxHashSet<u64>,
+    /// Spacetime snapshots for emergence metrics (sampled every 100 steps).
+    spacetime_snapshots: Vec<Vec<bool>>,
+    /// Grid snapshot at step 500 for shift cross-correlation.
+    early_snapshot: Option<Vec<bool>>,
 }
 
 #[derive(Debug)]
@@ -474,11 +484,16 @@ impl Simulation {
                 transient_pattern_names: [""; 8],
                 transient_pattern_name_count: 0,
                 max_oscillator_period: 0,
+                derrida: crate::emergence::DerridaResult::default(),
+                complexity: crate::emergence::ComplexityResult::default(),
+                shift: crate::emergence::ShiftResult::default(),
             },
             hash_seen: FxHashMap::default(),
             candidate_period: None,
             narrative_tracker: narrative::NarrativeTracker::new(),
             seen_ships: FxHashSet::default(),
+            spacetime_snapshots: Vec::new(),
+            early_snapshot: None,
         })
     }
 
@@ -616,6 +631,24 @@ impl Simulation {
             self.stats.narrative = self.narrative_tracker.stats;
         }
 
+        // Emergence: collect spacetime snapshots every 100 steps
+        if self.step % 100 == 0 && self.stats.period == 0 && self.spacetime_snapshots.len() < 100 {
+            self.spacetime_snapshots
+                .push(crate::emergence::snapshot_grid(grid));
+        }
+        // Save early snapshot for shift cross-correlation
+        if self.step == 500 && self.early_snapshot.is_none() {
+            self.early_snapshot = Some(crate::emergence::snapshot_grid(grid));
+        }
+        // Derrida measurement at step 1000 (enough transient for meaningful damage spreading)
+        if self.step == 1000 {
+            let size = grid.size();
+            let px = size.x / 2;
+            let py = size.y / 2;
+            self.stats.derrida =
+                crate::emergence::measure_derrida_from_grid(grid, px, py, 50);
+        }
+
         // Transient analysis: sample periodically during the active transient phase
         // to detect spaceships and high-period oscillators that won't survive to stabilization.
         // Only for deterministic rules (frozen GoL) where analysis is meaningful.
@@ -701,17 +734,42 @@ impl Simulation {
             let extra = self.step - self.stats.stabilized_step;
             let needed = (self.stats.period * 10).max(200);
             if extra >= needed {
+                self.finalize_emergence();
                 let snap = self.save_snap();
                 return Err(Conclusion::Done(self.stats, snap));
             }
         }
 
         if self.step > self.limits.max_steps {
+            self.finalize_emergence();
             let snap = self.save_snap();
             Err(Conclusion::Done(self.stats, snap))
         } else {
             let analysis = grid.analyze_with_births(births);
             self.stats.update(analysis, &self.limits)
+        }
+    }
+
+    fn finalize_emergence(&mut self) {
+        let grid = self.grids.get(self.grid_index).unwrap();
+        let size = grid.size();
+        let width = size.x as usize;
+        let height = size.y as usize;
+
+        // Spacetime complexity from collected snapshots
+        if !self.spacetime_snapshots.is_empty() {
+            self.stats.complexity = crate::emergence::spacetime_complexity(
+                &self.spacetime_snapshots,
+                width,
+            );
+        }
+
+        // Shift cross-correlation: compare early snapshot with current grid
+        if let Some(ref early) = self.early_snapshot {
+            let late = crate::emergence::snapshot_grid(grid);
+            self.stats.shift = crate::emergence::shift_cross_correlation(
+                early, &late, width, height, 5,
+            );
         }
     }
 }

@@ -129,7 +129,7 @@ pub fn connected_components(grid: &Grid) -> Vec<Vec<Coordinates>> {
 }
 
 /// One step of pure Game of Life on a grid (no RNG, deterministic B3/S23).
-fn gol_step(grid: &Grid) -> Grid {
+pub fn gol_step(grid: &Grid) -> Grid {
     let size = grid.size();
     let mut next = Grid::new(size);
     for y in 0..size.y {

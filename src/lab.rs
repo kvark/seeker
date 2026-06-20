@@ -52,7 +52,9 @@ impl BehaviorCell {
                 2
             } else {
                 0
-            };
+            }
+            + (stats.derrida.criticality_score() as u32 / 10)
+            + (stats.complexity.complexity as u32 / 10);
         let interest = match raw_interest {
             0 => 0,
             1..=2 => 1,
@@ -372,7 +374,19 @@ impl Laboratory {
                     let spatial_bonus =
                         (state.spatial_variance_average * 3000.0).min(15.0) as usize;
                     let narrative_bonus = state.narrative.richness().min(100) / 7;
-                    base + birth_bonus + spatial_bonus + narrative_bonus
+                    let criticality_bonus = state.derrida.criticality_score() / 2;
+                    let complexity_bonus = (state.complexity.complexity as usize).min(50) / 2;
+                    let shift_bonus = if state.shift.has_translating_structure {
+                        15
+                    } else {
+                        0
+                    };
+                    base + birth_bonus
+                        + spatial_bonus
+                        + narrative_bonus
+                        + criticality_bonus
+                        + complexity_bonus
+                        + shift_bonus
                 }
             }
             Conclusion::Crash => 0,
