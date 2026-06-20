@@ -148,6 +148,37 @@ fn main() {
                 println!();
             }
 
+            println!("\nComplexity score:");
+            print!("s6\\s3   ");
+            for xi in (0..res).step_by(2) {
+                print!(" {:.2}", xi as f32 / (res - 1) as f32);
+            }
+            println!();
+            for yi in 0..res {
+                let y_val = yi as f32 / (res - 1) as f32;
+                print!("  {:.2}  |", y_val);
+                for xi in 0..res {
+                    let p = &points2[yi * res + xi];
+                    if p.alive_ratio < 0.001 {
+                        print!("  -  ");
+                    } else {
+                        print!(" {:4.1}", p.complexity.complexity);
+                    }
+                }
+                println!();
+            }
+
+            // Find peak complexity in each slice
+            for (label, pts) in [("spawn[2]×spawn[3]", &points), ("spawn[3]×spawn[6]", &points2)] {
+                let peak = pts.iter()
+                    .filter(|p| p.alive_ratio >= 0.001)
+                    .max_by(|a, b| a.complexity.complexity.partial_cmp(&b.complexity.complexity).unwrap());
+                if let Some(p) = peak {
+                    println!("\nPeak complexity in {}: {:.1} at x={:.2}, y={:.2} (Derrida={:.3})",
+                        label, p.complexity.complexity, p.x_param, p.y_param, p.derrida.spreading_rate);
+                }
+            }
+
             if mode == "slice" { return; }
         }
         _ => {}
