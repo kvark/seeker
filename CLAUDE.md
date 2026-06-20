@@ -293,6 +293,15 @@ Key findings:
   and sustained (spawn[3]≈0.10, spawn[2]≈0.75-0.95).
 - GoL→HighLife transect: complexity decreases monotonically from 4.5 to 2.5 as
   HighLife character increases — B6 adds chaos without adding structure
+- **1000-rule critical surface survey** (96×96, 8 seeds, 2000 steps, ~20 min parallel):
+  - 617/1000 pass mean-field filter, 573 have measurable Derrida signal
+  - Phase distribution: 132 ordered (23%), **421 critical (73%)**, 20 chaotic (3.5%)
+  - 422 rules score ≥ 80 criticality; avg complexity 2.79, max complexity **9.58**
+  - Top-10 most critical rules (score 98-99) have λ ∈ [0.96, 1.03], low alive (6-22%)
+  - **Criticality is the dominant regime**: 73% of viable rules are near-critical,
+    suggesting that the critical surface is not a thin boundary but the bulk of
+    viable rule space. Rules that sustain life are overwhelmingly near-critical.
+  - Higher complexity (3-4.4) appears at slightly sub-critical spreading rates (λ≈0.96)
 
 ### Phase F: Deeper exploration (next)
 1. Test novel critical rules for pattern formation (still lifes, oscillators, ships)
