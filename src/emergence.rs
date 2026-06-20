@@ -494,6 +494,57 @@ fn deterministic_step(g: &Grid, spawn: &[f32; 9], keep: &[f32; 9]) -> Grid {
     next
 }
 
+/// Step with position-seeded randomness: both Derrida twins get identical
+/// random numbers at each (x,y) so only the initial perturbation causes
+/// divergence. Uses a simple hash: splitmix64 of (step<<32 | y<<16 | x).
+fn seeded_probabilistic_step(
+    g: &Grid,
+    spawn: &[f32; 9],
+    keep: &[f32; 9],
+    step: u64,
+) -> Grid {
+    use crate::grid::Cell;
+    let sz = g.size();
+    let mut next = Grid::new(sz);
+    for y in 0..sz.y {
+        for x in 0..sz.x {
+            let mut count = 0u32;
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    if dx == 0 && dy == 0 { continue; }
+                    if g.get(x + dx, y + dy).is_some() {
+                        count += 1;
+                    }
+                }
+            }
+            let hash_input = (step << 32) | ((y as u64 & 0xFFFF) << 16) | (x as u64 & 0xFFFF);
+            let coin = splitmix_f32(hash_input);
+            *next.mutate(x, y) = match g.get(x, y) {
+                None if coin < spawn[count as usize] => Some(Cell {
+                    age: std::num::NonZeroU32::new(1).unwrap(),
+                    avg_breed_age: 0.0,
+                    avg_velocity: [0.0; 2],
+                }),
+                Some(cell) if coin < keep[count as usize] => Some(Cell {
+                    age: std::num::NonZeroU32::new(cell.age.get() + 1).unwrap(),
+                    avg_breed_age: cell.avg_breed_age,
+                    avg_velocity: cell.avg_velocity,
+                }),
+                _ => None,
+            };
+        }
+    }
+    next
+}
+
+fn splitmix_f32(mut x: u64) -> f32 {
+    x = x.wrapping_add(0x9E3779B97F4A7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+    x = x ^ (x >> 31);
+    (x >> 40) as f32 / (1u64 << 24) as f32
+}
+
 fn is_deterministic(spawn: &[f32; 9], keep: &[f32; 9]) -> bool {
     spawn.iter().chain(keep.iter()).all(|&p| p == 0.0 || p == 1.0)
 }
@@ -579,12 +630,18 @@ fn measure_rule(
         let dr = if det {
             derrida_parameter(&dense, &perturbed, |g| deterministic_step(g, spawn, keep), cfg.derrida_steps)
         } else {
-            // Derrida measures sensitivity to initial conditions — valid with
-            // deterministic dynamics even for probabilistic rules.
+            // Position-seeded stepping: both twins get identical per-cell
+            // randomness at the same step, so only the initial perturbation
+            // drives divergence. Counter increments on each call; since
+            // derrida_parameter calls step_fn for A then B at each step,
+            // we divide by 2 to get the logical step number.
             let sp = *spawn;
             let kp = *keep;
+            let call_counter = std::cell::Cell::new(0u64);
             derrida_parameter(&dense, &perturbed, |g| {
-                deterministic_step(g, &sp, &kp)
+                let c = call_counter.get();
+                call_counter.set(c + 1);
+                seeded_probabilistic_step(g, &sp, &kp, c / 2)
             }, cfg.derrida_steps)
         };
 
