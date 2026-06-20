@@ -425,53 +425,54 @@ pub fn rule_transect(
         };
 
         let size = Coordinates { x: grid_size, y: grid_size };
+
+        let make_step_fn = move |sp: [f32; 9], kp: [f32; 9]| {
+            move |g: &Grid| {
+                let sz = g.size();
+                let mut next = Grid::new(sz);
+                for y in 0..sz.y {
+                    for x in 0..sz.x {
+                        let mut count = 0u32;
+                        for dy in -1..=1i32 {
+                            for dx in -1..=1i32 {
+                                if dx == 0 && dy == 0 { continue; }
+                                if g.get(x + dx, y + dy).is_some() {
+                                    count += 1;
+                                }
+                            }
+                        }
+                        *next.mutate(x, y) = match g.get(x, y) {
+                            None if sp[count as usize] > 0.5 => Some(Cell {
+                                age: std::num::NonZeroU32::new(1).unwrap(),
+                                avg_breed_age: 0.0,
+                                avg_velocity: [0.0; 2],
+                            }),
+                            Some(cell) if kp[count as usize] > 0.5 => Some(Cell {
+                                age: std::num::NonZeroU32::new(cell.age.get() + 1).unwrap(),
+                                avg_breed_age: cell.avg_breed_age,
+                                avg_velocity: cell.avg_velocity,
+                            }),
+                            _ => None,
+                        };
+                    }
+                }
+                next
+            }
+        };
+        let step_fn = make_step_fn(spawn, keep);
+
+        // Complexity measurement: 10% density, run full simulation
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let mut grid = Grid::new(size);
         for y in 0..grid_size {
             for x in 0..grid_size {
-                let coin: f32 = {
-                    use rand::Rng;
-                    rng.gen()
-                };
+                let coin: f32 = { use rand::Rng; rng.gen() };
                 if coin < 0.1 {
                     grid.init(x, y);
                 }
             }
         }
 
-        let step_fn = move |g: &Grid| {
-            let sz = g.size();
-            let mut next = Grid::new(sz);
-            for y in 0..sz.y {
-                for x in 0..sz.x {
-                    let mut count = 0u32;
-                    for dy in -1..=1i32 {
-                        for dx in -1..=1i32 {
-                            if dx == 0 && dy == 0 { continue; }
-                            if g.get(x + dx, y + dy).is_some() {
-                                count += 1;
-                            }
-                        }
-                    }
-                    *next.mutate(x, y) = match g.get(x, y) {
-                        None if spawn[count as usize] > 0.5 => Some(Cell {
-                            age: std::num::NonZeroU32::new(1).unwrap(),
-                            avg_breed_age: 0.0,
-                            avg_velocity: [0.0; 2],
-                        }),
-                        Some(cell) if keep[count as usize] > 0.5 => Some(Cell {
-                            age: std::num::NonZeroU32::new(cell.age.get() + 1).unwrap(),
-                            avg_breed_age: cell.avg_breed_age,
-                            avg_velocity: cell.avg_velocity,
-                        }),
-                        _ => None,
-                    };
-                }
-            }
-            next
-        };
-
-        // Run simulation to collect snapshots
         let mut current = grid.clone();
         let mut snapshots = Vec::new();
         let mut alive_ratio = 0.0f32;
@@ -480,28 +481,41 @@ pub fn rule_transect(
             if s % 20 == 0 {
                 snapshots.push(snapshot_grid(&current));
             }
-            let alive = current.alive_count() as f32 / (grid_size * grid_size) as f32;
-            alive_ratio = alive;
-            if alive == 0.0 || alive > 0.9 {
+            alive_ratio = current.alive_count() as f32 / (grid_size * grid_size) as f32;
+            if alive_ratio == 0.0 || alive_ratio > 0.9 {
                 break;
             }
         }
 
-        // Derrida measurement
-        let mut perturbed = grid.clone();
-        let px = grid_size / 2;
-        let py = grid_size / 2;
-        let cell = perturbed.mutate(px, py);
-        if cell.is_some() {
-            *cell = None;
-        } else {
-            *cell = Some(Cell {
-                age: std::num::NonZeroU32::new(1).unwrap(),
-                avg_breed_age: 0.0,
-                avg_velocity: [0.0; 2],
-            });
-        }
-        let derrida = derrida_parameter(&grid, &perturbed, &step_fn, 50);
+        // Derrida measurement: separate dense grid (50% density) for clean signal.
+        // Standard protocol: random 50% soup, flip one cell, track Hamming divergence.
+        let derrida = {
+            let step_fn2 = make_step_fn(spawn, keep);
+            let mut rng2 = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(0x_DEAD_BEEF));
+            let mut dense_grid = Grid::new(size);
+            for y in 0..grid_size {
+                for x in 0..grid_size {
+                    let coin: f32 = { use rand::Rng; rng2.gen() };
+                    if coin < 0.5 {
+                        dense_grid.init(x, y);
+                    }
+                }
+            }
+            let mut perturbed = dense_grid.clone();
+            let px = grid_size / 2;
+            let py = grid_size / 2;
+            let cell = perturbed.mutate(px, py);
+            if cell.is_some() {
+                *cell = None;
+            } else {
+                *cell = Some(Cell {
+                    age: std::num::NonZeroU32::new(1).unwrap(),
+                    avg_breed_age: 0.0,
+                    avg_velocity: [0.0; 2],
+                });
+            }
+            derrida_parameter(&dense_grid, &perturbed, &step_fn2, 50)
+        };
 
         let complexity = spacetime_complexity(&snapshots, grid_size as usize);
 
