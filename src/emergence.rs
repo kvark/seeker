@@ -387,12 +387,245 @@ pub struct TransectPoint {
     pub alive_ratio: f32,
 }
 
+/// Configuration for transect measurements.
+pub struct TransectConfig {
+    pub grid_size: i32,
+    pub sim_steps: usize,
+    pub num_seeds: usize,
+    pub derrida_steps: usize,
+}
+
+impl Default for TransectConfig {
+    fn default() -> Self {
+        Self {
+            grid_size: 64,
+            sim_steps: 1000,
+            num_seeds: 4,
+            derrida_steps: 50,
+        }
+    }
+}
+
+fn interpolate_rules(
+    spawn_a: &[f32; 9], keep_a: &[f32; 9],
+    spawn_b: &[f32; 9], keep_b: &[f32; 9],
+    t: f32,
+) -> ([f32; 9], [f32; 9]) {
+    let mut spawn = [0.0f32; 9];
+    let mut keep = [0.0f32; 9];
+    for k in 0..9 {
+        spawn[k] = spawn_a[k] * (1.0 - t) + spawn_b[k] * t;
+        keep[k] = keep_a[k] * (1.0 - t) + keep_b[k] * t;
+    }
+    (spawn, keep)
+}
+
+/// One probabilistic step: each cell uses the probability tables with RNG.
+fn probabilistic_step(
+    g: &Grid,
+    spawn: &[f32; 9],
+    keep: &[f32; 9],
+    rng: &mut impl rand::Rng,
+) -> Grid {
+    use crate::grid::Cell;
+    let sz = g.size();
+    let mut next = Grid::new(sz);
+    for y in 0..sz.y {
+        for x in 0..sz.x {
+            let mut count = 0u32;
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    if dx == 0 && dy == 0 { continue; }
+                    if g.get(x + dx, y + dy).is_some() {
+                        count += 1;
+                    }
+                }
+            }
+            let coin: f32 = rng.gen();
+            *next.mutate(x, y) = match g.get(x, y) {
+                None if coin < spawn[count as usize] => Some(Cell {
+                    age: std::num::NonZeroU32::new(1).unwrap(),
+                    avg_breed_age: 0.0,
+                    avg_velocity: [0.0; 2],
+                }),
+                Some(cell) if coin < keep[count as usize] => Some(Cell {
+                    age: std::num::NonZeroU32::new(cell.age.get() + 1).unwrap(),
+                    avg_breed_age: cell.avg_breed_age,
+                    avg_velocity: cell.avg_velocity,
+                }),
+                _ => None,
+            };
+        }
+    }
+    next
+}
+
+/// Deterministic step using threshold > 0.5.
+fn deterministic_step(g: &Grid, spawn: &[f32; 9], keep: &[f32; 9]) -> Grid {
+    use crate::grid::Cell;
+    let sz = g.size();
+    let mut next = Grid::new(sz);
+    for y in 0..sz.y {
+        for x in 0..sz.x {
+            let mut count = 0u32;
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    if dx == 0 && dy == 0 { continue; }
+                    if g.get(x + dx, y + dy).is_some() {
+                        count += 1;
+                    }
+                }
+            }
+            *next.mutate(x, y) = match g.get(x, y) {
+                None if spawn[count as usize] > 0.5 => Some(Cell {
+                    age: std::num::NonZeroU32::new(1).unwrap(),
+                    avg_breed_age: 0.0,
+                    avg_velocity: [0.0; 2],
+                }),
+                Some(cell) if keep[count as usize] > 0.5 => Some(Cell {
+                    age: std::num::NonZeroU32::new(cell.age.get() + 1).unwrap(),
+                    avg_breed_age: cell.avg_breed_age,
+                    avg_velocity: cell.avg_velocity,
+                }),
+                _ => None,
+            };
+        }
+    }
+    next
+}
+
+fn is_deterministic(spawn: &[f32; 9], keep: &[f32; 9]) -> bool {
+    spawn.iter().chain(keep.iter()).all(|&p| p == 0.0 || p == 1.0)
+}
+
+fn make_soup(size: crate::grid::Coordinates, density: f32, rng: &mut impl rand::Rng) -> Grid {
+    let mut grid = Grid::new(size);
+    for y in 0..size.y {
+        for x in 0..size.x {
+            if rng.gen::<f32>() < density {
+                grid.init(x, y);
+            }
+        }
+    }
+    grid
+}
+
+/// Measure emergence for a single rule set, averaging over multiple seeds.
+fn measure_rule(
+    spawn: &[f32; 9],
+    keep: &[f32; 9],
+    cfg: &TransectConfig,
+    base_seed: u64,
+) -> (DerridaResult, ComplexityResult, f32) {
+    use crate::grid::{Cell, Coordinates};
+    use rand::SeedableRng;
+
+    let size = Coordinates { x: cfg.grid_size, y: cfg.grid_size };
+    let total_cells = (cfg.grid_size * cfg.grid_size) as f32;
+    let det = is_deterministic(spawn, keep);
+
+    let mut sum_spreading = 0.0f64;
+    let mut sum_lambda = 0.0f64;
+    let mut sum_entropy = 0.0f64;
+    let mut sum_autocorr = 0.0f64;
+    let mut sum_complexity = 0.0f64;
+    let mut sum_alive = 0.0f64;
+    let mut valid_count = 0u32;
+
+    for s in 0..cfg.num_seeds {
+        let seed = base_seed.wrapping_add(s as u64 * 0x_9E37_79B9);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+        // Complexity: 10% soup, run full simulation
+        let grid = make_soup(size, 0.1, &mut rng);
+        let mut current = grid.clone();
+        let mut snapshots = Vec::new();
+        let mut alive_ratio = 0.0f32;
+        for step in 0..cfg.sim_steps {
+            current = if det {
+                deterministic_step(&current, spawn, keep)
+            } else {
+                probabilistic_step(&current, spawn, keep, &mut rng)
+            };
+            if step % 20 == 0 {
+                snapshots.push(snapshot_grid(&current));
+            }
+            alive_ratio = current.alive_count() as f32 / total_cells;
+            if alive_ratio == 0.0 || alive_ratio > 0.9 {
+                break;
+            }
+        }
+
+        let cx = spacetime_complexity(&snapshots, cfg.grid_size as usize);
+
+        // Derrida: 50% dense soup, flip one cell, measure divergence
+        let derrida_seed = seed.wrapping_add(0x_DEAD_BEEF);
+        let mut rng_d = rand::rngs::StdRng::seed_from_u64(derrida_seed);
+        let dense = make_soup(size, 0.5, &mut rng_d);
+        let mut perturbed = dense.clone();
+        let px = cfg.grid_size / 2;
+        let py = cfg.grid_size / 2;
+        let cell = perturbed.mutate(px, py);
+        if cell.is_some() {
+            *cell = None;
+        } else {
+            *cell = Some(Cell {
+                age: std::num::NonZeroU32::new(1).unwrap(),
+                avg_breed_age: 0.0,
+                avg_velocity: [0.0; 2],
+            });
+        }
+
+        let dr = if det {
+            derrida_parameter(&dense, &perturbed, |g| deterministic_step(g, spawn, keep), cfg.derrida_steps)
+        } else {
+            // Derrida measures sensitivity to initial conditions — valid with
+            // deterministic dynamics even for probabilistic rules.
+            let sp = *spawn;
+            let kp = *keep;
+            derrida_parameter(&dense, &perturbed, |g| {
+                deterministic_step(g, &sp, &kp)
+            }, cfg.derrida_steps)
+        };
+
+        sum_spreading += dr.spreading_rate as f64;
+        sum_lambda += dr.lambda as f64;
+        sum_entropy += cx.entropy as f64;
+        sum_autocorr += cx.autocorrelation as f64;
+        sum_complexity += cx.complexity as f64;
+        sum_alive += alive_ratio as f64;
+        valid_count += 1;
+    }
+
+    if valid_count == 0 {
+        return (DerridaResult::default(), ComplexityResult::default(), 0.0);
+    }
+
+    let n = valid_count as f64;
+    let avg_derrida = DerridaResult {
+        lambda: (sum_lambda / n) as f32,
+        initial_damage: 1,
+        final_damage: (sum_lambda / n) as usize,
+        peak_damage: 0,
+        spreading_rate: (sum_spreading / n) as f32,
+    };
+    let avg_complexity = ComplexityResult {
+        entropy: (sum_entropy / n) as f32,
+        autocorrelation: (sum_autocorr / n) as f32,
+        density_variance: 0.0,
+        complexity: (sum_complexity / n) as f32,
+    };
+    let avg_alive = (sum_alive / n) as f32;
+
+    (avg_derrida, avg_complexity, avg_alive)
+}
+
 /// Sweep a 1D path through rule space, measuring emergence at each point.
 ///
 /// Linearly interpolates spawn and keep tables from `rules_a` to `rules_b`
 /// at `num_points` evenly spaced values of t ∈ [0, 1].
-/// For each interpolated rule, runs a simulation from a random soup and measures
-/// Derrida damage-spreading and spacetime complexity.
+/// Uses probabilistic stepping for non-binary rules and averages over
+/// `cfg.num_seeds` random initial conditions for noise reduction.
 pub fn rule_transect(
     spawn_a: &[f32; 9],
     keep_a: &[f32; 9],
@@ -403,20 +636,31 @@ pub fn rule_transect(
     sim_steps: usize,
     seed: u64,
 ) -> Vec<TransectPoint> {
-    use crate::grid::{Coordinates, Grid, Cell};
+    let cfg = TransectConfig {
+        grid_size,
+        sim_steps,
+        num_seeds: 4,
+        derrida_steps: 50,
+    };
+    rule_transect_cfg(spawn_a, keep_a, spawn_b, keep_b, num_points, seed, &cfg)
+}
+
+pub fn rule_transect_cfg(
+    spawn_a: &[f32; 9],
+    keep_a: &[f32; 9],
+    spawn_b: &[f32; 9],
+    keep_b: &[f32; 9],
+    num_points: usize,
+    seed: u64,
+    cfg: &TransectConfig,
+) -> Vec<TransectPoint> {
     use crate::rules;
-    use rand::SeedableRng;
 
     let mut results = Vec::with_capacity(num_points);
 
     for i in 0..num_points {
         let t = i as f32 / (num_points - 1).max(1) as f32;
-        let mut spawn = [0.0f32; 9];
-        let mut keep = [0.0f32; 9];
-        for k in 0..9 {
-            spawn[k] = spawn_a[k] * (1.0 - t) + spawn_b[k] * t;
-            keep[k] = keep_a[k] * (1.0 - t) + keep_b[k] * t;
-        }
+        let (spawn, keep) = interpolate_rules(spawn_a, keep_a, spawn_b, keep_b, t);
 
         let mf = match rules::mean_field_classify(&spawn, &keep) {
             rules::MeanFieldClass::Stable(rho) => rho,
@@ -424,100 +668,7 @@ pub fn rule_transect(
             rules::MeanFieldClass::Grows => 1.0,
         };
 
-        let size = Coordinates { x: grid_size, y: grid_size };
-
-        let make_step_fn = move |sp: [f32; 9], kp: [f32; 9]| {
-            move |g: &Grid| {
-                let sz = g.size();
-                let mut next = Grid::new(sz);
-                for y in 0..sz.y {
-                    for x in 0..sz.x {
-                        let mut count = 0u32;
-                        for dy in -1..=1i32 {
-                            for dx in -1..=1i32 {
-                                if dx == 0 && dy == 0 { continue; }
-                                if g.get(x + dx, y + dy).is_some() {
-                                    count += 1;
-                                }
-                            }
-                        }
-                        *next.mutate(x, y) = match g.get(x, y) {
-                            None if sp[count as usize] > 0.5 => Some(Cell {
-                                age: std::num::NonZeroU32::new(1).unwrap(),
-                                avg_breed_age: 0.0,
-                                avg_velocity: [0.0; 2],
-                            }),
-                            Some(cell) if kp[count as usize] > 0.5 => Some(Cell {
-                                age: std::num::NonZeroU32::new(cell.age.get() + 1).unwrap(),
-                                avg_breed_age: cell.avg_breed_age,
-                                avg_velocity: cell.avg_velocity,
-                            }),
-                            _ => None,
-                        };
-                    }
-                }
-                next
-            }
-        };
-        let step_fn = make_step_fn(spawn, keep);
-
-        // Complexity measurement: 10% density, run full simulation
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut grid = Grid::new(size);
-        for y in 0..grid_size {
-            for x in 0..grid_size {
-                let coin: f32 = { use rand::Rng; rng.gen() };
-                if coin < 0.1 {
-                    grid.init(x, y);
-                }
-            }
-        }
-
-        let mut current = grid.clone();
-        let mut snapshots = Vec::new();
-        let mut alive_ratio = 0.0f32;
-        for s in 0..sim_steps {
-            current = step_fn(&current);
-            if s % 20 == 0 {
-                snapshots.push(snapshot_grid(&current));
-            }
-            alive_ratio = current.alive_count() as f32 / (grid_size * grid_size) as f32;
-            if alive_ratio == 0.0 || alive_ratio > 0.9 {
-                break;
-            }
-        }
-
-        // Derrida measurement: separate dense grid (50% density) for clean signal.
-        // Standard protocol: random 50% soup, flip one cell, track Hamming divergence.
-        let derrida = {
-            let step_fn2 = make_step_fn(spawn, keep);
-            let mut rng2 = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(0x_DEAD_BEEF));
-            let mut dense_grid = Grid::new(size);
-            for y in 0..grid_size {
-                for x in 0..grid_size {
-                    let coin: f32 = { use rand::Rng; rng2.gen() };
-                    if coin < 0.5 {
-                        dense_grid.init(x, y);
-                    }
-                }
-            }
-            let mut perturbed = dense_grid.clone();
-            let px = grid_size / 2;
-            let py = grid_size / 2;
-            let cell = perturbed.mutate(px, py);
-            if cell.is_some() {
-                *cell = None;
-            } else {
-                *cell = Some(Cell {
-                    age: std::num::NonZeroU32::new(1).unwrap(),
-                    avg_breed_age: 0.0,
-                    avg_velocity: [0.0; 2],
-                });
-            }
-            derrida_parameter(&dense_grid, &perturbed, &step_fn2, 50)
-        };
-
-        let complexity = spacetime_complexity(&snapshots, grid_size as usize);
+        let (derrida, complexity, alive_ratio) = measure_rule(&spawn, &keep, cfg, seed);
 
         results.push(TransectPoint {
             t,
@@ -529,6 +680,144 @@ pub fn rule_transect(
     }
 
     results
+}
+
+/// Result of a 2D slice through rule space.
+#[derive(Clone, Debug)]
+pub struct SlicePoint {
+    pub x_param: f32,
+    pub y_param: f32,
+    pub derrida: DerridaResult,
+    pub complexity: ComplexityResult,
+    pub mean_field: f64,
+    pub alive_ratio: f32,
+}
+
+/// Sweep a 2D slice through rule space by varying two spawn/keep entries.
+///
+/// `base_spawn`/`base_keep` define the starting rule.
+/// `x_index` and `y_index` select which table entries to vary:
+///   0-8 → spawn[i], 9-17 → keep[i-9].
+/// Each axis sweeps from 0.0 to 1.0 in `resolution` steps.
+pub fn rule_slice_2d(
+    base_spawn: &[f32; 9],
+    base_keep: &[f32; 9],
+    x_index: usize,
+    y_index: usize,
+    resolution: usize,
+    seed: u64,
+    cfg: &TransectConfig,
+) -> Vec<SlicePoint> {
+    let mut results = Vec::with_capacity(resolution * resolution);
+
+    for yi in 0..resolution {
+        let y_val = yi as f32 / (resolution - 1).max(1) as f32;
+        for xi in 0..resolution {
+            let x_val = xi as f32 / (resolution - 1).max(1) as f32;
+
+            let mut spawn = *base_spawn;
+            let mut keep = *base_keep;
+
+            if x_index < 9 {
+                spawn[x_index] = x_val;
+            } else {
+                keep[x_index - 9] = x_val;
+            }
+            if y_index < 9 {
+                spawn[y_index] = y_val;
+            } else {
+                keep[y_index - 9] = y_val;
+            }
+
+            let mf = match crate::rules::mean_field_classify(&spawn, &keep) {
+                crate::rules::MeanFieldClass::Stable(rho) => rho,
+                crate::rules::MeanFieldClass::Decays => 0.0,
+                crate::rules::MeanFieldClass::Grows => 1.0,
+            };
+
+            let (derrida, complexity, alive_ratio) = measure_rule(&spawn, &keep, cfg, seed);
+
+            results.push(SlicePoint {
+                x_param: x_val,
+                y_param: y_val,
+                derrida,
+                complexity,
+                mean_field: mf,
+                alive_ratio,
+            });
+        }
+    }
+
+    results
+}
+
+/// A rule found near the critical surface (Derrida ≈ 1.0).
+#[derive(Clone, Debug)]
+pub struct CriticalRule {
+    pub spawn: [f32; 9],
+    pub keep: [f32; 9],
+    pub spreading_rate: f32,
+    pub criticality_score: usize,
+    pub complexity: f32,
+    pub alive_ratio: f32,
+    pub mean_field: f64,
+}
+
+/// Search for rules near the critical surface by scanning rule space.
+///
+/// Generates random rules (filtered by mean-field viability), measures
+/// Derrida spreading rate, and keeps those near criticality.
+pub fn find_critical_rules(
+    num_samples: usize,
+    seed: u64,
+    cfg: &TransectConfig,
+) -> Vec<CriticalRule> {
+    use crate::rules;
+    use rand::SeedableRng;
+    use rand::Rng;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut critical = Vec::new();
+
+    for _ in 0..num_samples {
+        let mut spawn = [0.0f32; 9];
+        let mut keep = [0.0f32; 9];
+
+        // Generate random rule biased toward sparse spawn, moderate keep
+        for k in 0..9usize {
+            if rng.gen::<f32>() < 0.3 {
+                spawn[k] = rng.gen::<f32>();
+            }
+            if rng.gen::<f32>() < 0.5 {
+                keep[k] = rng.gen::<f32>();
+            }
+        }
+
+        // Mean-field pre-filter
+        let mf = rules::mean_field_classify(&spawn, &keep);
+        let mf_val = match mf {
+            rules::MeanFieldClass::Stable(rho) => rho,
+            rules::MeanFieldClass::Decays | rules::MeanFieldClass::Grows => continue,
+        };
+
+        let (derrida, complexity, alive) = measure_rule(&spawn, &keep, cfg, rng.gen());
+
+        if derrida.spreading_rate > 0.0 && alive > 0.001 {
+            let cs = derrida.criticality_score();
+            critical.push(CriticalRule {
+                spawn,
+                keep,
+                spreading_rate: derrida.spreading_rate,
+                criticality_score: cs,
+                complexity: complexity.complexity,
+                alive_ratio: alive,
+                mean_field: mf_val,
+            });
+        }
+    }
+
+    critical.sort_by(|a, b| b.criticality_score.cmp(&a.criticality_score));
+    critical
 }
 
 #[cfg(test)]
