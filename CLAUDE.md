@@ -260,9 +260,27 @@ CPU (lab.rs)                          GPU (blade compute)
 3. ~~Shift cross-correlation: detect translating structures without rule-specific classification~~ done
 4. Stimulus-response: perturb stabilized system, measure response locality
 
-### Phase E: Critical surface mapping (next)
-1. High-resolution transects between more rule pairs (finer t steps, larger grids)
-2. 2D slices through rule space (e.g., vary spawn[2] × spawn[3] with fixed keep)
-3. Multi-seed averaging for Derrida to reduce noise
-4. Probabilistic rule stepping in transects (RNG-based, not threshold-based)
-5. Identify and catalog critical-surface rules with Derrida ≈ 1.0
+### Phase E: Critical surface mapping — done
+1. ~~High-resolution transects (41 points, 96×96, 8-seed, 2000 steps)~~ done
+2. ~~2D slices: spawn[2]×spawn[3] and spawn[3]×spawn[6] at 21×21~~ done
+3. ~~Multi-seed averaging (4-8 seeds per measurement point)~~ done
+4. ~~Position-seeded probabilistic Derrida (splitmix64 hash of step×y×x)~~ done
+5. ~~Critical surface search: 1000 random viable rules cataloged~~ done
+
+Key findings:
+- GoL spreading_rate ≈ 1.074-1.098 (near-critical, varies with grid size/seeds)
+- HighLife ≈ 1.078-1.115 (slightly more chaotic, nearly indistinguishable at high res)
+- Complexity peaks at 7.3-7.8 near the "edge of emergence" — where a rule
+  just barely supports life (spawn probability near the viability threshold)
+- 95/200 random viable rules show measurable Derrida signal; top 7 have
+  criticality_score = 99 with spreading_rate ≈ 1.0
+- Novel critical rules found (e.g., spawn[0]=0.91 + complex keep) produce
+  Derrida 1.07-1.10 with complexity 3.6-4.1, sustaining structured dynamics
+  at 25-27% density
+
+### Phase F: Deeper exploration (next)
+1. Test novel critical rules for pattern formation (still lifes, oscillators, ships)
+2. Longer simulations (10K+ steps) to check for methuselah-like transients
+3. Compare narrative richness of novel critical rules vs GoL
+4. Search for rules that produce higher complexity than GoL (complexity > 5)
+5. Map critical surface in higher dimensions (vary 3+ parameters simultaneously)
