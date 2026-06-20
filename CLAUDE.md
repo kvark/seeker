@@ -136,6 +136,10 @@ track classified-cell coverage and component independence.
 - Rule transect sweeps (examples/transect.rs): GoL spreading_rate ≈ 1.098 confirms
   near-critical behavior; HighLife ≈ 1.108 (slightly more chaotic)
 - Rule-space search with emergence-aware fitness reaches 42% MAP-Elites coverage
+- Parallelized emergence measurements (transects, 2D slices, critical search) via
+  std::thread::scope — ~2.5-4x speedup on multi-core machines
+- Critical surface search with progress reporting, mean-field pre-filter,
+  multi-seed averaging, and position-seeded probabilistic Derrida
 
 ### Detector calibration gaps (blocking rule-space exploration)
 1. **Pulsar recognition**: `name_pattern` says 12 cells but a pulsar has 48 cells
@@ -266,17 +270,29 @@ CPU (lab.rs)                          GPU (blade compute)
 3. ~~Multi-seed averaging (4-8 seeds per measurement point)~~ done
 4. ~~Position-seeded probabilistic Derrida (splitmix64 hash of step×y×x)~~ done
 5. ~~Critical surface search: 1000 random viable rules cataloged~~ done
+6. ~~Parallelize transects, slices, critical search (std::thread::scope)~~ done
 
 Key findings:
-- GoL spreading_rate ≈ 1.074-1.098 (near-critical, varies with grid size/seeds)
-- HighLife ≈ 1.078-1.115 (slightly more chaotic, nearly indistinguishable at high res)
-- Complexity peaks at 7.3-7.8 near the "edge of emergence" — where a rule
-  just barely supports life (spawn probability near the viability threshold)
-- 95/200 random viable rules show measurable Derrida signal; top 7 have
-  criticality_score = 99 with spreading_rate ≈ 1.0
-- Novel critical rules found (e.g., spawn[0]=0.91 + complex keep) produce
-  Derrida 1.07-1.10 with complexity 3.6-4.1, sustaining structured dynamics
-  at 25-27% density
+- GoL spreading_rate ≈ 1.074 at high resolution (96×96, 8 seeds); HighLife ≈ 1.078
+  (nearly indistinguishable — transition at t≈0.525 adds B6)
+- **Sharp phase transitions**: 2D slices show discontinuous Derrida jumps (0.4→0.8→0.9),
+  suggesting first-order phase transitions in rule space, not smooth gradients
+- **Complexity peaks at viability boundary**: The highest complexity scores (7.3-7.8)
+  occur right where a rule barely supports life — the transition from extinction to
+  sustained dynamics. The "edge of emergence" is literally the survival threshold.
+- Two classes of critical rules discovered:
+  - **GoL-like** (Derrida ≈ 1.00, e.g. critical-rule3): recognizable patterns
+    (blinkers, blocks), low complexity (1.4-1.5), sparse (7-10% alive)
+  - **Novel** (Derrida ≈ 1.08-1.11, e.g. critical-rule7): no classified patterns,
+    higher complexity (3.8-4.1), dense (25-27%), spawn[0]=0.91 + broad survival
+- Criticality alone doesn't predict pattern formation: true criticality (λ≈1.0) with
+  GoL-like rules produces familiar objects, while slightly supercritical novel rules
+  produce unclassified but structured dynamics
+- 2D slice spawn[2]×spawn[3] (GoL keep): 4 quadrants — ordered (both low), edge
+  (one high), chaotic (both high). Complexity peak at the border between extinct
+  and sustained (spawn[3]≈0.10, spawn[2]≈0.75-0.95).
+- GoL→HighLife transect: complexity decreases monotonically from 4.5 to 2.5 as
+  HighLife character increases — B6 adds chaos without adding structure
 
 ### Phase F: Deeper exploration (next)
 1. Test novel critical rules for pattern formation (still lifes, oscillators, ships)
@@ -284,3 +300,4 @@ Key findings:
 3. Compare narrative richness of novel critical rules vs GoL
 4. Search for rules that produce higher complexity than GoL (complexity > 5)
 5. Map critical surface in higher dimensions (vary 3+ parameters simultaneously)
+6. Use parallelized search to run 10K+ sample surveys with finer mean-field binning
