@@ -933,6 +933,501 @@ pub fn find_critical_rules(
     critical
 }
 
+// ============================================================
+// Directed critical-surface search methods
+// ============================================================
+
+/// Lightweight Derrida-only measurement for gradient estimation.
+/// Uses smaller grid and fewer seeds than full `measure_rule`.
+fn quick_spreading_rate(spawn: &[f32; 9], keep: &[f32; 9], seed: u64) -> f32 {
+    let cfg = TransectConfig {
+        grid_size: 48,
+        sim_steps: 400,
+        num_seeds: 3,
+        derrida_steps: 40,
+    };
+    let (dr, _, _) = measure_rule(spawn, keep, &cfg, seed);
+    dr.spreading_rate
+}
+
+/// Result of a directed critical search step.
+#[derive(Clone, Debug)]
+pub struct CriticalSearchResult {
+    pub spawn: [f32; 9],
+    pub keep: [f32; 9],
+    pub spreading_rate: f32,
+    pub complexity: f32,
+    pub alive_ratio: f32,
+    pub method: &'static str,
+}
+
+/// Gradient descent toward λ=1 from a starting rule.
+///
+/// Numerically estimates ∂λ/∂p for each nonzero parameter, then steps
+/// in the direction that moves λ closer to 1.0. Returns the trajectory.
+pub fn gradient_descent_to_critical(
+    spawn_start: &[f32; 9],
+    keep_start: &[f32; 9],
+    max_steps: usize,
+    seed: u64,
+    cfg: &TransectConfig,
+) -> Vec<CriticalSearchResult> {
+    let epsilon = 0.02f32;
+    let learning_rate = 0.1f32;
+    let target = 1.0f32;
+
+    let mut spawn = *spawn_start;
+    let mut keep = *keep_start;
+    let mut trajectory = Vec::new();
+
+    for step in 0..max_steps {
+        let step_seed = seed.wrapping_add(step as u64 * 0x_1234_5678);
+        let (dr, cx, alive) = measure_rule(&spawn, &keep, cfg, step_seed);
+        let lambda = dr.spreading_rate;
+
+        trajectory.push(CriticalSearchResult {
+            spawn,
+            keep,
+            spreading_rate: lambda,
+            complexity: cx.complexity,
+            alive_ratio: alive,
+            method: "gradient_descent",
+        });
+
+        if (lambda - target).abs() < 0.01 {
+            break;
+        }
+        if lambda == 0.0 {
+            break;
+        }
+
+        // Compute gradient: ∂λ/∂spawn[k] and ∂λ/∂keep[k]
+        let mut grad_spawn = [0.0f32; 9];
+        let mut grad_keep = [0.0f32; 9];
+
+        for k in 0..9 {
+            if spawn[k] > 0.0 || keep[k] > 0.0 {
+                if spawn[k] > 0.0 {
+                    let mut sp_plus = spawn;
+                    sp_plus[k] = (spawn[k] + epsilon).min(1.0);
+                    let lambda_plus = quick_spreading_rate(&sp_plus, &keep, step_seed);
+                    if lambda_plus > 0.0 {
+                        grad_spawn[k] = (lambda_plus - lambda) / epsilon;
+                    }
+                }
+                if keep[k] > 0.0 {
+                    let mut kp_plus = keep;
+                    kp_plus[k] = (keep[k] + epsilon).min(1.0);
+                    let lambda_plus = quick_spreading_rate(&spawn, &kp_plus, step_seed);
+                    if lambda_plus > 0.0 {
+                        grad_keep[k] = (lambda_plus - lambda) / epsilon;
+                    }
+                }
+            }
+        }
+
+        // Step toward target: if λ > 1, move in -∇λ direction; if λ < 1, move in +∇λ
+        // Reduce step size as we approach target
+        let distance = (lambda - target).abs();
+        let adaptive_lr = learning_rate * distance.min(1.0);
+        let sign = if lambda > target { -1.0 } else { 1.0 };
+        for k in 0..9 {
+            spawn[k] = (spawn[k] + sign * adaptive_lr * grad_spawn[k]).clamp(0.0, 1.0);
+            keep[k] = (keep[k] + sign * adaptive_lr * grad_keep[k]).clamp(0.0, 1.0);
+        }
+    }
+
+    trajectory
+}
+
+/// Binary search on a transect between two rules to find the exact critical point.
+///
+/// Given an ordered rule (λ < 1) and a chaotic rule (λ > 1), bisects the
+/// interpolation parameter t until λ is within `tolerance` of 1.0.
+pub fn binary_search_critical(
+    spawn_ordered: &[f32; 9],
+    keep_ordered: &[f32; 9],
+    spawn_chaotic: &[f32; 9],
+    keep_chaotic: &[f32; 9],
+    tolerance: f32,
+    max_iterations: usize,
+    seed: u64,
+    cfg: &TransectConfig,
+) -> CriticalSearchResult {
+    let mut lo = 0.0f32;
+    let mut hi = 1.0f32;
+    let mut best_spawn = *spawn_ordered;
+    let mut best_keep = *keep_ordered;
+    let mut best_lambda = 0.0f32;
+    let mut best_cx = 0.0f32;
+    let mut best_alive = 0.0f32;
+
+    for iter in 0..max_iterations {
+        let mid = (lo + hi) / 2.0;
+        let (spawn, keep) = interpolate_rules(spawn_ordered, keep_ordered, spawn_chaotic, keep_chaotic, mid);
+        let iter_seed = seed.wrapping_add(iter as u64 * 0x_ABCD_EF01);
+        let (dr, cx, alive) = measure_rule(&spawn, &keep, cfg, iter_seed);
+
+        best_spawn = spawn;
+        best_keep = keep;
+        best_lambda = dr.spreading_rate;
+        best_cx = cx.complexity;
+        best_alive = alive;
+
+        if (dr.spreading_rate - 1.0).abs() < tolerance {
+            break;
+        }
+
+        if dr.spreading_rate < 1.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    CriticalSearchResult {
+        spawn: best_spawn,
+        keep: best_keep,
+        spreading_rate: best_lambda,
+        complexity: best_cx,
+        alive_ratio: best_alive,
+        method: "binary_search",
+    }
+}
+
+/// CMA-ES-inspired evolutionary optimization for criticality × complexity.
+///
+/// Maintains a population of rules, evaluates a combined fitness of
+/// criticality_score + complexity, and evolves toward rules that are both
+/// critical and complex. Uses rank-based selection and Gaussian perturbation.
+pub fn cma_evolve_critical(
+    population_size: usize,
+    generations: usize,
+    seed: u64,
+    cfg: &TransectConfig,
+) -> Vec<CriticalSearchResult> {
+    use rand::Rng;
+    use rand::SeedableRng;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+    // Initialize population from random viable rules
+    let mut population: Vec<([f32; 9], [f32; 9])> = Vec::new();
+    for _ in 0..population_size * 4 {
+        if population.len() >= population_size {
+            break;
+        }
+        let mut spawn = [0.0f32; 9];
+        let mut keep = [0.0f32; 9];
+        for k in 0..9 {
+            if rng.gen::<f32>() < 0.3 {
+                spawn[k] = rng.gen::<f32>();
+            }
+            if rng.gen::<f32>() < 0.5 {
+                keep[k] = rng.gen::<f32>();
+            }
+        }
+        let mf = crate::rules::mean_field_classify(&spawn, &keep);
+        if matches!(mf, crate::rules::MeanFieldClass::Stable(_)) {
+            population.push((spawn, keep));
+        }
+    }
+
+    // Pad if we didn't get enough
+    while population.len() < population_size {
+        let mut spawn = [0.0f32; 9];
+        let mut keep = [0.0f32; 9];
+        spawn[3] = rng.gen::<f32>();
+        keep[2] = rng.gen::<f32>();
+        keep[3] = rng.gen::<f32>();
+        population.push((spawn, keep));
+    }
+
+    let mut best_results: Vec<CriticalSearchResult> = Vec::new();
+    let mut sigma = 0.15f32; // mutation step size
+
+    for gen in 0..generations {
+        // Evaluate population in parallel
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let scored: Vec<(f64, [f32; 9], [f32; 9], f32, f32, f32)> = std::thread::scope(|s| {
+            let chunks: Vec<_> = population.chunks(population.len().div_ceil(num_threads)).collect();
+            let handles: Vec<_> = chunks.into_iter().enumerate().map(|(ci, chunk)| {
+                let cfg = &cfg;
+                let gen_seed = seed.wrapping_add(gen as u64 * 0x_FF00_FF00 + ci as u64);
+                s.spawn(move || {
+                    chunk.iter().map(|(sp, kp)| {
+                        let (dr, cx, alive) = measure_rule(sp, kp, cfg, gen_seed);
+                        // Fitness: criticality × (1 + complexity/10) × viability
+                        let crit = dr.criticality_score() as f64;
+                        let viability = if alive > 0.01 { 1.0 } else { 0.1 };
+                        let fitness = crit * (1.0 + cx.complexity as f64 / 10.0) * viability;
+                        (fitness, *sp, *kp, dr.spreading_rate, cx.complexity, alive)
+                    }).collect::<Vec<_>>()
+                })
+            }).collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+
+        // Sort by fitness (descending)
+        let mut ranked = scored;
+        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Record best
+        let (fitness, sp, kp, lambda, cx, alive) = &ranked[0];
+        eprintln!("  gen {:2}: best fitness={:.1}, λ={:.3}, cx={:.1}, alive={:.3}",
+            gen, fitness, lambda, cx, alive);
+        best_results.push(CriticalSearchResult {
+            spawn: *sp,
+            keep: *kp,
+            spreading_rate: *lambda,
+            complexity: *cx,
+            alive_ratio: *alive,
+            method: "cma_evolve",
+        });
+
+        if gen == generations - 1 {
+            break;
+        }
+
+        // Select top half as parents
+        let elite_size = population_size / 2;
+        let elites: Vec<_> = ranked[..elite_size].iter()
+            .map(|(_, sp, kp, ..)| (*sp, *kp))
+            .collect();
+
+        // Generate next population: elites + mutated offspring
+        population.clear();
+        population.extend_from_slice(&elites);
+
+        while population.len() < population_size {
+            let parent_idx = rng.gen_range(0..elite_size);
+            let (parent_sp, parent_kp) = &elites[parent_idx];
+            let mut child_sp = *parent_sp;
+            let mut child_kp = *parent_kp;
+
+            // Gaussian perturbation
+            for k in 0..9 {
+                if child_sp[k] > 0.0 || rng.gen::<f32>() < 0.05 {
+                    child_sp[k] = (child_sp[k] + gaussian(&mut rng) * sigma).clamp(0.0, 1.0);
+                }
+                if child_kp[k] > 0.0 || rng.gen::<f32>() < 0.05 {
+                    child_kp[k] = (child_kp[k] + gaussian(&mut rng) * sigma).clamp(0.0, 1.0);
+                }
+            }
+
+            // Only keep if mean-field viable
+            let mf = crate::rules::mean_field_classify(&child_sp, &child_kp);
+            if matches!(mf, crate::rules::MeanFieldClass::Stable(_)) {
+                population.push((child_sp, child_kp));
+            }
+        }
+
+        // Adaptive step size: shrink if converging, grow if stuck
+        if gen > 0 {
+            let prev_fit = best_results[best_results.len() - 2].spreading_rate;
+            let curr_fit = best_results[best_results.len() - 1].spreading_rate;
+            if (curr_fit - 1.0).abs() < (prev_fit - 1.0).abs() {
+                sigma *= 0.9;
+            } else {
+                sigma *= 1.1;
+            }
+            sigma = sigma.clamp(0.02, 0.3);
+        }
+    }
+
+    best_results
+}
+
+/// Trace the critical manifold from a known critical rule.
+///
+/// Starting from a rule with λ≈1, perturb one parameter at a time and
+/// use Newton's method on another parameter to restore λ=1. This traces
+/// out the critical surface in the direction of increasing complexity.
+pub fn trace_critical_manifold(
+    spawn_start: &[f32; 9],
+    keep_start: &[f32; 9],
+    num_steps: usize,
+    step_size: f32,
+    seed: u64,
+    cfg: &TransectConfig,
+) -> Vec<CriticalSearchResult> {
+    let mut spawn = *spawn_start;
+    let mut keep = *keep_start;
+    let mut trajectory = Vec::new();
+
+    // Initial measurement
+    let (dr, cx, alive) = measure_rule(&spawn, &keep, cfg, seed);
+    trajectory.push(CriticalSearchResult {
+        spawn,
+        keep,
+        spreading_rate: dr.spreading_rate,
+        complexity: cx.complexity,
+        alive_ratio: alive,
+        method: "manifold_trace",
+    });
+
+    for step in 0..num_steps {
+        let step_seed = seed.wrapping_add(step as u64 * 0x_7777_7777);
+
+        // Find which parameter to perturb: pick a random active one
+        // We perturb a "drive" parameter and adjust a "control" to stay on λ=1
+        let active_spawn: Vec<usize> = (0..9).filter(|&k| spawn[k] > 0.01).collect();
+        let active_keep: Vec<usize> = (0..9).filter(|&k| keep[k] > 0.01).collect();
+
+        if active_spawn.is_empty() && active_keep.is_empty() {
+            break;
+        }
+
+        // Choose drive parameter: the one whose gradient has the largest
+        // complexity component (move toward higher complexity)
+        let mut best_drive = None;
+        let mut best_cx_grad = f32::NEG_INFINITY;
+
+        let epsilon = 0.03f32;
+        let base_lambda = quick_spreading_rate(&spawn, &keep, step_seed);
+        let base_cx = {
+            let (_, c, _) = measure_rule(&spawn, &keep, &TransectConfig {
+                grid_size: 48, sim_steps: 500, num_seeds: 2, derrida_steps: 30,
+            }, step_seed);
+            c.complexity
+        };
+
+        for &k in &active_spawn {
+            let mut sp_test = spawn;
+            sp_test[k] = (spawn[k] + epsilon).min(1.0);
+            let (_, cx_test, _) = measure_rule(&sp_test, &keep, &TransectConfig {
+                grid_size: 48, sim_steps: 500, num_seeds: 2, derrida_steps: 30,
+            }, step_seed);
+            let cx_grad = (cx_test.complexity - base_cx) / epsilon;
+            if cx_grad > best_cx_grad {
+                best_cx_grad = cx_grad;
+                best_drive = Some((true, k));
+            }
+        }
+        for &k in &active_keep {
+            let mut kp_test = keep;
+            kp_test[k] = (keep[k] + epsilon).min(1.0);
+            let (_, cx_test, _) = measure_rule(&spawn, &kp_test, &TransectConfig {
+                grid_size: 48, sim_steps: 500, num_seeds: 2, derrida_steps: 30,
+            }, step_seed);
+            let cx_grad = (cx_test.complexity - base_cx) / epsilon;
+            if cx_grad > best_cx_grad {
+                best_cx_grad = cx_grad;
+                best_drive = Some((false, k));
+            }
+        }
+
+        let Some((is_spawn_drive, drive_idx)) = best_drive else { break; };
+
+        // Perturb drive parameter
+        if is_spawn_drive {
+            spawn[drive_idx] = (spawn[drive_idx] + step_size).clamp(0.0, 1.0);
+        } else {
+            keep[drive_idx] = (keep[drive_idx] + step_size).clamp(0.0, 1.0);
+        }
+
+        // Choose control parameter: the one with the largest |∂λ/∂p|
+        // (most effective at restoring λ=1)
+        let mut best_control = None;
+        let mut best_lambda_grad = 0.0f32;
+
+        for &k in &active_spawn {
+            if is_spawn_drive && k == drive_idx { continue; }
+            let mut sp_test = spawn;
+            sp_test[k] = (spawn[k] + epsilon).min(1.0);
+            let l = quick_spreading_rate(&sp_test, &keep, step_seed);
+            if l > 0.0 {
+                let grad = (l - base_lambda).abs() / epsilon;
+                if grad > best_lambda_grad {
+                    best_lambda_grad = grad;
+                    best_control = Some((true, k));
+                }
+            }
+        }
+        for &k in &active_keep {
+            if !is_spawn_drive && k == drive_idx { continue; }
+            let mut kp_test = keep;
+            kp_test[k] = (keep[k] + epsilon).min(1.0);
+            let l = quick_spreading_rate(&spawn, &kp_test, step_seed);
+            if l > 0.0 {
+                let grad = (l - base_lambda).abs() / epsilon;
+                if grad > best_lambda_grad {
+                    best_lambda_grad = grad;
+                    best_control = Some((false, k));
+                }
+            }
+        }
+
+        // Newton's method: adjust control to restore λ=1
+        if let Some((is_spawn_ctrl, ctrl_idx)) = best_control {
+            for _ in 0..5 {
+                let current_lambda = quick_spreading_rate(&spawn, &keep, step_seed);
+                if (current_lambda - 1.0).abs() < 0.02 {
+                    break;
+                }
+                if current_lambda == 0.0 {
+                    break;
+                }
+
+                // Estimate gradient of λ w.r.t. control
+                let grad = if is_spawn_ctrl {
+                    let mut sp_test = spawn;
+                    sp_test[ctrl_idx] = (spawn[ctrl_idx] + epsilon).min(1.0);
+                    let l = quick_spreading_rate(&sp_test, &keep, step_seed);
+                    (l - current_lambda) / epsilon
+                } else {
+                    let mut kp_test = keep;
+                    kp_test[ctrl_idx] = (keep[ctrl_idx] + epsilon).min(1.0);
+                    let l = quick_spreading_rate(&spawn, &kp_test, step_seed);
+                    (l - current_lambda) / epsilon
+                };
+
+                if grad.abs() < 1e-6 {
+                    break;
+                }
+
+                // Damped Newton step (0.5× to avoid overshooting)
+                let correction = 0.5 * (1.0 - current_lambda) / grad;
+                if is_spawn_ctrl {
+                    spawn[ctrl_idx] = (spawn[ctrl_idx] + correction).clamp(0.0, 1.0);
+                } else {
+                    keep[ctrl_idx] = (keep[ctrl_idx] + correction).clamp(0.0, 1.0);
+                }
+            }
+        }
+
+        // Full measurement at the new point
+        let (dr, cx, alive) = measure_rule(&spawn, &keep, cfg, step_seed);
+        trajectory.push(CriticalSearchResult {
+            spawn,
+            keep,
+            spreading_rate: dr.spreading_rate,
+            complexity: cx.complexity,
+            alive_ratio: alive,
+            method: "manifold_trace",
+        });
+
+        eprintln!("  trace step {:2}: λ={:.3}, cx={:.1}, alive={:.3}",
+            step, dr.spreading_rate, cx.complexity, alive);
+
+        // Bail if we lost viability
+        if alive < 0.001 || dr.spreading_rate == 0.0 {
+            break;
+        }
+    }
+
+    trajectory
+}
+
+fn gaussian(rng: &mut impl rand::Rng) -> f32 {
+    let u1: f32 = rng.gen::<f32>().max(1e-10);
+    let u2: f32 = rng.gen();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
