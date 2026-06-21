@@ -303,10 +303,28 @@ Key findings:
     viable rule space. Rules that sustain life are overwhelmingly near-critical.
   - Higher complexity (3-4.4) appears at slightly sub-critical spreading rates (λ≈0.96)
 
-### Phase F: Deeper exploration (next)
+### Phase F: Directed critical-surface search — in progress
+1. ~~Gradient descent toward λ=1~~ done — converges in 5-10 steps from HighLife,
+   but finds "dead" critical rules (alive≈0). Adaptive learning rate helps stability.
+2. ~~Binary search on transects~~ done — finds exact critical interpolation between
+   ordered/chaotic pairs. GoL↔B2345/S2345 yields complexity 6.2 near λ=1.13.
+3. ~~CMA-ES evolution (criticality × complexity)~~ done — population 16, 10 gens.
+   Found complexity **10.8** (exceeds 9.58 random survey max) at λ=1.13, alive=0.27.
+   Best rule: spawn[3]=0.77, keep[0,1,2,3,5,6] — broad probabilistic survival.
+4. ~~Critical manifold tracing~~ done — perturb toward higher complexity, Newton-correct
+   back to λ=1. Stays near-critical for 5-6 steps before drifting. Damped Newton needed.
+
+Key learnings:
+- CMA-ES is the most effective: finds higher complexity than random search in minutes
+- Gradient descent finds criticality reliably but converges to extinction boundary
+- The *interesting* region is criticality + viable population (alive > 1%)
+- Manifold tracing is theoretically cleanest but numerically unstable due to
+  measurement noise at low-res grid sizes
+
+### Phase G: Remaining exploration
 1. Test novel critical rules for pattern formation (still lifes, oscillators, ships)
 2. Longer simulations (10K+ steps) to check for methuselah-like transients
 3. Compare narrative richness of novel critical rules vs GoL
-4. Search for rules that produce higher complexity than GoL (complexity > 5)
+4. Run CMA-ES with larger population (64+) and more generations (50+) for deeper search
 5. Map critical surface in higher dimensions (vary 3+ parameters simultaneously)
 6. Use parallelized search to run 10K+ sample surveys with finer mean-field binning
