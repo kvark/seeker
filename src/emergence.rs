@@ -1044,6 +1044,7 @@ pub fn gradient_descent_to_critical(
 ///
 /// Given an ordered rule (λ < 1) and a chaotic rule (λ > 1), bisects the
 /// interpolation parameter t until λ is within `tolerance` of 1.0.
+#[allow(clippy::too_many_arguments)]
 pub fn binary_search_critical(
     spawn_ordered: &[f32; 9],
     keep_ordered: &[f32; 9],
@@ -1094,6 +1095,9 @@ pub fn binary_search_critical(
         method: "binary_search",
     }
 }
+
+/// A scored population member: (fitness, spawn, keep, spreading_rate, complexity, alive).
+type ScoredRule = (f64, [f32; 9], [f32; 9], f32, f32, f32);
 
 /// CMA-ES-inspired evolutionary optimization for criticality × complexity.
 ///
@@ -1152,7 +1156,7 @@ pub fn cma_evolve_critical(
             .map(|n| n.get())
             .unwrap_or(1);
 
-        let scored: Vec<(f64, [f32; 9], [f32; 9], f32, f32, f32)> = std::thread::scope(|s| {
+        let scored: Vec<ScoredRule> = std::thread::scope(|s| {
             let chunks: Vec<_> = population.chunks(population.len().div_ceil(num_threads)).collect();
             let handles: Vec<_> = chunks.into_iter().enumerate().map(|(ci, chunk)| {
                 let cfg = &cfg;
