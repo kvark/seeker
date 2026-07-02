@@ -1,330 +1,193 @@
-# Seeker - Research Notes
+# Seeker — Research Notes
 
 ## What This Project Is
 
-Seeker is an experimental research project exploring how life emerges from simple rules (QLUE - Question of Life, Universe, and Everything). It's a cellular automata-based system that searches for interesting, survivable patterns through evolutionary mutation and selection.
+Seeker is an experimental research project exploring how life emerges from simple
+physics (QLUE — the Question of Life, Universe, and Everything). The goal is to
+understand the **conditions for emergence**: what properties of a local physics
+allow complex, structured, agent-like behavior to arise, and — the harder
+question — how selection can become *intrinsic* to the physics rather than
+imposed by a fitness function we wrote.
 
-The ultimate goal is understanding the **conditions for emergence** — what properties of a local physics (rule set) allow complex, structured, agent-like behavior to arise from simple initial conditions? This is approached via:
-1. Building a reliable **detector** for interestingness at multiple levels
-2. Calibrating that detector on known ground truth (Game of Life's cataloged objects)
-3. Using the trusted detector to explore unknown rule spaces
+## The Pivot: M-γ — a continuous, mass- and energy-conserving substrate
 
-Two modes:
-- **Play** — manually advance a cellular automaton step-by-step in a TUI
-- **Find** — automatically search for interesting rule configurations via evolutionary algorithms
+Seeker began on **discrete cellular automata** (Game of Life and probabilistic
+generalizations), building an "interestingness detector" and searching rule space
+with it. That lineage (call it **M-α / M-β**) reached diminishing returns:
 
-## Methodology: Detector-First
+- The measurement pain — "what is movement," glider-vs-oscillator ambiguity,
+  multi-component object recognition — was an artifact of the *discrete* substrate,
+  not of the questions we care about.
+- M-β was converging on prior art (Genelife: GoL + heritable genome + density
+  regulation). Extending it meant reinventing existing work.
 
-The project deliberately spends time on frozen B3/S23 (standard Game of Life)
-before exploring novel rule spaces. Rationale: GoL has the richest catalog of
-known objects (gliders, guns, pulsars, methuselahs, spaceships of every size)
-with precise expected frequencies from Catagolue's census of ~10¹³ soups. This
-serves as a **labeled dataset** for developing and validating the interestingness
-detector.
+So Seeker is pivoting to **M-γ**: rebuild on **Flow-Lenia** (a continuous,
+mass-conserving substrate with parameter localization), then add an **energy
+economy** on top so that selection falls out of the physics. In a continuous
+substrate, velocity is a plain observable (center-of-mass drift), self-repair is
+native, and the genotype→phenotype map is smooth enough for mutation and gradients
+to climb. The full plan lives in `docs/mgamma-plan.md`.
 
-Concretely: if our detector can't find/score a glider, it can't be trusted to
-recognize analogous translating structures in an unknown rule. Each level of the
-interestingness hierarchy needs calibration against known GoL phenomena before
-we point it at the probabilistic rule space.
+The **gap M-γ actually fills**: Flow-Lenia's own authors name *food consumption as
+an intrinsic selective pressure* as future work. M-γ is Flow-Lenia + a
+metabolism/energy economy — a motivated gap, not a reimplementation.
 
-Current calibration status:
-- Levels 1-3 (persistence, structure, dynamics): calibrated — reliably detects
-  still lifes, blinkers, toads, beacons, gliders in final and transient states.
-- Level 4 (narrative): implemented but not yet validated against known
-  methuselah event sequences (R-pentomino should produce ~1103 steps of drama).
-- Levels 5-6 (emergence, composability): implemented but need calibration
-  against guns and multi-component mechanisms.
+## Substrate spec — Flow-Lenia core
 
-Once the detector passes calibration at all levels, the search shifts to
-exploring the full probabilistic rule space with the detector as the fitness
-landscape.
+Multi-channel, continuous state. Per step:
+
+1. **Affinity.** Convolve a radial (Lenia) kernel with each channel, then map
+   through a Gaussian growth function → an affinity field `U_i ∈ [-1, 1]`. Growth
+   is **not added** to the state; it only shapes where matter wants to flow.
+2. **Flow.** `F_i = (1 - α)·∇U_i − α·∇A_Σ`, where `A_Σ` is total local mass and
+   `α(x) = clamp((A_Σ/θ_A)^n, 0, 1)` ramps in a mass-regulation (anti-crowding)
+   term as `A_Σ` approaches a critical mass `θ_A`. Gradients via Sobel.
+3. **Transport.** Move matter along `F` with **reintegration tracking**: each
+   cell's mass lands on a unit box centered at `p + dt·F`, split bilinearly across
+   the four overlapped cells. The split weights sum to 1, so **total mass is
+   conserved exactly**. Because mass is only moved, total mass is a constant of
+   motion fixed by the initial condition; structure arises from redistribution.
+4. **Parameter localization** (M-γ-1+). A parameter field advects *with* the mass,
+   so heterogeneous rules coexist, compete, and mix in one world — this is what
+   makes it multi-species.
+
+## The new part — energy economy (the M-γ contribution)
+
+The research bet, to build and revise (a hypothesis, not a spec):
+
+- **Energy field `E(x)`** — scalar "food," separate from matter.
+- **Sources.** Localized renewable sources inject energy at a capped rate. `E`
+  diffuses so exploitable gradients form.
+- **Metabolism.** Growth is *gated* by local energy; realized growth *consumes*
+  energy; maintenance drains energy proportional to mass (staying organized costs).
+- **Death & recycling (closed loop, recommended).** Energy-starved matter converts
+  to an inert **detritus** channel that decays back into `E` over time. Matter is
+  conserved across {live channels + detritus}; energy cycles. A real nutrient
+  cycle — death and recycling without abandoning conservation.
+
+**Why it matters:** creatures whose localized parameters let them find, hold, and
+convert energy persist and spread; others starve. Selection becomes a consequence
+of the economy, not a fitness function — the fix for the "designer-in-the-loop"
+problem the discrete lineage couldn't escape.
 
 ## Architecture
 
-- `src/grid.rs` — 2D grid with `Option<Cell>` storage, supports Wrap and Dead boundaries
-- `src/sim.rs` — Simulation engine: probabilistic CA rules, compiled kernel fast path, period detection, transient analysis
-- `src/lab.rs` — Evolutionary search: MAP-Elites quality-diversity, parallel experiments via Choir
-- `src/analysis.rs` — Post-stabilization pattern classification (still lifes, oscillators, spaceships) via connected components
-- `src/emergence.rs` — Rule-agnostic emergence metrics: Derrida damage-spreading, spacetime complexity, shift cross-correlation, rule transects
-- `src/narrative.rs` — Event tracking (splits, merges, births, deaths) for Level 4 measurement
-- `src/gpu.rs` — Batch CA simulation on GPU via blade-graphics compute shaders
-- `src/rules.rs` — Rule-space analysis: mean-field pre-filter, known rule tables, Bn/Sm parsing
-- `src/main.rs` — CLI modes: play (TUI), find (TUI), headless, replay
+Current (M-γ):
 
-## How the Search Works
+- `src/flow_lenia.rs` — Flow-Lenia CPU reference substrate. Multi-channel
+  continuous field, ring-kernel convolution, Lenia growth, Sobel gradients, flow
+  assembly, reintegration-tracking transport (bilinear scatter, exact mass
+  conservation). This is the ground truth to validate a GPU port against.
+- `examples/flow_lenia.rs` — headless run: mass-drift + center-of-mass drift
+  report, animated GIF export.
 
-1. **Rules**: Probabilistic CA with a weighted kernel (neighborhood), spawn table, and keep table. In frozen mode, rules are locked to B3/S23 and only initial conditions evolve.
-2. **MAP-Elites**: Quality-diversity search over a 2D behavior space (density × interestingness). Uniform selection across occupied cells provides diversity pressure without explicit novelty mechanisms.
-3. **Parallel experiments**: Up to `max_active` concurrent simulations via Choir work-stealing executor. Workers check for boring experiments (low variance streak) and abort early.
-4. **Mutations (frozen mode)**: 30% fresh soup, 30% focused flip (1-8 cells near existing alive), 20% satellite soup, 20% symmetric soup. Soup strategies: census (16×16@50%), methuselah (10-20@37%), dense small, large sparse.
-5. **Mutations (probabilistic mode)**: 1-3 mutations per offspring across spawn/keep tables, kernel weights, grid size, boundary mode.
-6. **Fitness (frozen)**: composite of variance, late stabilization, analysis (unique patterns, ships×30, oscillator periods, composability), birth rate, spatial variance, narrative richness, transient ships, high periods.
-7. **GPU path**: Bitpacked grids on GPU, B3/S23 compute shader, stats-only readback. Lab remains backend-agnostic.
+Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
+then to be removed; all history is in git):
 
-## Hierarchy of Interestingness
+- `src/grid.rs`, `src/sim.rs` — discrete grid + probabilistic CA engine
+- `src/lab.rs` — MAP-Elites evolutionary search
+- `src/analysis.rs` — connected-component pattern classification
+- `src/emergence.rs` — Derrida damage-spreading, spacetime complexity, directed
+  critical-surface search
+- `src/narrative.rs`, `src/rules.rs`, `src/gpu.rs`, `src/tui.rs`, `src/render.rs`,
+  `src/main.rs` — event tracking, rule tables, discrete GPU shader, TUI, discrete
+  binary
+- `examples/transect.rs`, `examples/critical_search.rs`,
+  `examples/critical_survey.rs` — emergence-metric experiments
 
-Why do humans find certain CA patterns interesting? The patterns we've named and
-cataloged share a common trait: their behavior is best described using vocabulary
-that doesn't exist in the rules. B3/S23 has no concept of "movement," yet a
-glider "moves." A gun "produces." A methuselah "tells a story."
+## Milestones
 
-The deeper principle: humans find patterns interesting when they exhibit emergent
-higher-level structure that can be described in fewer concepts than the raw
-cell-level description. We're pattern-matching CA phenomena onto our intuitions
-about agency, causality, narrative, and hierarchy.
+Each is gated on a **measured** property, not eyeballing.
 
-Seeker's search should climb this ladder:
+- **M-γ-0 — vanilla Flow-Lenia, single species.** ✅ CPU reference done. Mass
+  conserved to `~2e-6` relative drift over 600 steps (f32 accumulation floor);
+  seeded blobs self-organize into persistent localized structure. GPU port (Blade)
+  and moving-SLP tuning are the open items — *tuning belongs to the search harness
+  (F1/F2), not hand-tuning* (see §Discipline).
+- **M-γ-1 — parameter localization + multi-species.** Advect a parameter field
+  with the mass; confirm coexistence and rule mixing. Watch parameter-field
+  variance — mass-weighted averaging is a low-pass filter that can homogenize the
+  gene pool; consider softmax / quantized inheritance.
+- **M-γ-2 — energy economy v0.** First real test of intrinsic selection: does
+  energy competition change *which* patterns persist?
+- **M-γ-3 — closed-loop detritus recycling.** Look for sustained, non-collapsing
+  ecosystems.
 
-| Level | Property | What it means | Example | Measured? |
-|-------|----------|---------------|---------|-----------|
-| 1 | **Persistence** | Didn't die or saturate | Survivors | Yes (fitness) |
-| 2 | **Structure** | Has identifiable, separated components | Block + blinker debris | Yes (pattern count, analysis.rs) |
-| 3 | **Dynamics** | Components oscillate or translate | Glider, blinker | Yes (period detection, birth rate, transient analysis) |
-| 4 | **Narrative** | Structural events happen over time: splits, collisions, births, deaths of components | Methuselah R-pentomino: 1103 steps of drama | Yes (narrative.rs) — needs calibration |
-| 5 | **Emergence** | Behavior needs higher-level description; spatial structure is non-uniform and evolving | Gun producing gliders; localized activity regions | Partial (4×4 spatial variance) — needs calibration |
-| 6 | **Composability** | Simple classified units compose into functional mechanisms; components are independent and recognizable | Glider + eater interaction; gun = oscillator + emitter | Yes (classified_ratio, independence) — needs calibration |
+## Followups (the phased program)
 
-### Level 4: Narrative — Event Tracking During Simulation
+- **F1 — Measurement harness (early, maybe before M-γ-2).** Reductions for total
+  mass/energy, mass-distribution entropy, connected-component count/sizes, velocity
+  distribution; Bedau–Packard evolutionary activity statistics; optional VLM
+  interestingness oracle. This is what lets us *make claims* instead of vibes.
+- **F2 — Outer-loop search.** MAP-Elites / illumination over rule + energy
+  parameters, harness metrics as behavior descriptors. GPU throughput (batch many
+  worlds) is the unfair advantage.
+- **F3 — Ablation science (the actual contribution).** Toggle mass conservation,
+  energy, sources, parameter localization, state continuity, dimensionality;
+  measure the effect on *sustained novelty*. Converts intuition into necessity
+  claims.
+- **F4 — Signal systems / proto-intelligence (north star).** Once organisms have
+  internal state + environment coupling, measure predictive information / transfer
+  entropy (environment → organism) and empowerment; watch for anticipatory
+  behavior.
 
-A "narrative" is a sequence of structural events. A methuselah has a rich event
-history. A still life has zero events. A gun has periodic emission events.
+## Engineering notes
 
-**Events** (detected by diffing connected components between sampled steps):
-- **Split**: one component becomes two (mitosis)
-- **Merge**: two components become one (collision)
-- **Birth**: a new component appears far from existing ones (emission)
-- **Death**: a component disappears (extinction)
+- **Compute on `blade-graphics`.** Fields as ping-pong storage textures; WGSL
+  compute passes for convolution → growth+gate → gradients → transport → energy →
+  swap. Prototype at 256²–512², kernel radius `R ≈ 13–20`. Direct convolution
+  first; FFT-convolve only if `R`/grid grows. Prefer a **gather** transport
+  formulation to avoid scatter-add atomics. Fallback rule: if a needed Blade
+  feature is missing/buggy, prototype that one piece in wgpu and port back — the
+  deliverable is the emergence result, not a proof Blade can do it.
+- **Alternative transport: MaCE** (arXiv:2507.12306) — a simpler mass-conserving
+  update with no flow-magnitude condition. Cheap to evaluate before committing to
+  the reintegration-tracking GPU kernel.
+- **Reintegration tracking bound.** `|F|·dt` must stay bounded (a few cells). The
+  CPU reference clamps displacement for advection fidelity; mass conservation holds
+  regardless (bilinear splat always conserves).
 
-**Metric**: `event_count * event_type_diversity`. High = interesting trajectory.
+## Discipline (read before tuning)
 
-### Level 5: Emergence — Spatial Structure
+The epistemic trap: if you hand-tune parameters until it "looks alive," you've
+smuggled yourself back in as the selector — the exact problem M-γ exists to escape.
+**Build the harness before heavy tuning.** Randomized, non-designed seeds +
+intrinsic metrics are the discipline that keeps the result real. Keep the energy
+layer **toggleable** so every experiment can A/B against pure Flow-Lenia.
 
-Emergence means behavior is best described at a higher level than individual
-cells. Practical proxy: **spatial entropy**.
+## Risks
 
-Divide the grid into NxN regions. Measure alive-density variance across regions.
-High spatial variance + temporal variation = structured, localized dynamics
-(guns, factories). Uniform density = boring soup or static noise.
+1. **Transport kernel is fiddly on GPU** (scatter races, the `|F|·dt` bound,
+   boundaries). Mitigate with a gather formulation, clamp/subcycle, and a
+   conservation unit-test every step. Consider MaCE.
+2. **The energy layer may do nothing** (or damp everything). It's the undesigned
+   part; keep it toggleable and budget iteration on the coupling.
+3. **Parameter mixing homogenizes the gene pool** → diversity collapses. Watch
+   parameter-field variance.
+4. **Perf.** Direct convolution × channels × large `R` × advection can stall
+   interactivity at 1024². Get correctness at 256²/512² first.
 
-**Metric**: variance of regional alive densities, tracked over time.
+## Open decisions (for the human)
 
-### Level 6: Composability — Functional Decomposition
+1. Energy coupling: multiplicative gate on growth vs additive; renewable vs finite
+   sources. (v0 default: multiplicative + renewable.)
+2. Death model: break strict conservation (simple) vs closed-loop detritus
+   recycling (recommended, more work).
+3. Advection: reintegration tracking vs MaCE's simpler scheme.
+4. Backend: Blade-only, or stand up a Meganeura path for *differentiable*
+   Flow-Lenia (gradient-based creature/rule search) at F2.
+5. Harness timing: minimal F1 before M-γ-2 (recommended) or after.
 
-Can the final state be understood as a composition of independent, classified
-sub-patterns? A grid full of Unknown blobs scores low. A grid with 3 gliders,
-2 blinkers, and a beehive scores high — each component is independently
-meaningful.
+## References
 
-**Metric**: fraction of alive cells belonging to classified (non-Unknown)
-patterns. Already partially measured by `analysis.rs`; needs enhancement to
-track classified-cell coverage and component independence.
-
-## Current Status
-
-### What works
-- MAP-Elites quality-diversity search with uniform cell selection (replaced fitness-proportional)
-- Compiled kernel + deterministic fast path (2-3x speedup for B3/S23)
-- Early discard via alive_ratio_variance streak detection
-- Transient analysis (steps 500-3000) catches gliders before they crash into debris
-- Diverse soup strategies: census, methuselah, symmetric, satellite, focused flip
-- Multiple mutations per offspring (1-3) for faster co-adaptation
-- Batch spawning fills all available worker slots
-- ~31% MAP-Elites coverage on 128×128, fitness 253-257, up to 25 transient gliders
-- GPU shader compiles and passes tests on lavapipe
-- Rule-agnostic emergence metrics (Derrida, spacetime complexity, shift correlation)
-  wired into simulation loop, fitness function, and headless output
-- Rule transect sweeps (examples/transect.rs): GoL spreading_rate ≈ 1.098 confirms
-  near-critical behavior; HighLife ≈ 1.108 (slightly more chaotic)
-- Rule-space search with emergence-aware fitness reaches 42% MAP-Elites coverage
-- Parallelized emergence measurements (transects, 2D slices, critical search) via
-  std::thread::scope — ~2.5-4x speedup on multi-core machines
-- Critical surface search with progress reporting, mean-field pre-filter,
-  multi-seed averaging, and position-seeded probabilistic Derrida
-
-### Detector calibration gaps (blocking rule-space exploration)
-1. **Pulsar recognition**: `name_pattern` says 12 cells but a pulsar has 48 cells
-   decomposed into multiple 8-connected components. Need multi-component
-   pseudo-object merging (what apgsearch calls "constellations").
-2. **Narrative validation**: Need to run R-pentomino through narrative tracker and
-   verify event count/diversity matches expected behavior (high splits early,
-   glider births mid-run, then calm).
-3. **Emergence calibration**: No known gun has been tested against the spatial
-   variance metric. A Gosper gun should produce high sustained spatial variance +
-   periodic birth events.
-4. **Transient counting**: A long-lived glider is counted at multiple sample points,
-   inflating `transient_spaceships`. Should track unique ships (by trajectory hash)
-   rather than sample occurrences.
-
-### Known remaining issues
-- `avg_velocity` cell field computed but unused — 16 bytes/cell overhead
-
-### Previously fixed (from original analysis)
-- ~~Fitness function is coarse~~ → composite fitness with level 2-6 signals
-- ~~Only one mutation per generation~~ → 1-3 mutations (50/30/20% distribution)
-- ~~No population diversity mechanism~~ → MAP-Elites with uniform cell selection
-- ~~Experiment pool grows unbounded~~ → capped archive, concluded experiments pruned
-- ~~Worker thread count is hardcoded~~ → workers scaled to max_active
-
-## GPU Acceleration (blade-graphics)
-
-### What's Built (Phase 1, partial)
-- `src/gpu.rs`: `GpuSimulator` struct with blade context, pipeline, buffers
-- `src/shaders/ca_step.wgsl`: B3/S23 compute shader (workgroup 256, toroidal wrap)
-- Bitpacked grid upload, ping-pong stepping, stats readback (alive, births, regions)
-- Tests pass on lavapipe (blinker oscillation, pack/unpack roundtrip)
-- `GpuSimulator::new` is infallible (panics on failure — shaders must work)
-
-### Phase 1: Complete
-- `step(K)` encodes all K steps in one submission, GPU-side buffer clears,
-  single sync at batch end
-- Shader honors `BoundaryMode::Dead` via `boundary_mode` uniform
-- `matches_cpu_simulation` test: GPU output is bit-identical to CPU
-  `Simulation` for both boundary modes
-- Multi-fidelity funnel wired into `Laboratory`: `gpu_screen` config spawns
-  a screener thread that scores candidate batches (level-1/2 signals);
-  only the best become CPU experiments. Slots the screener can't fill fall
-  back to direct spawning, so a slow GPU (lavapipe) never starves the search.
-  See `data/hunt-gpu.ron`.
-
-### Phase 2: Complete
-- Table-driven spawn/keep: `GpuBatchConfig` carries `spawn_table` and
-  `keep_table` (`[f32; 9]` for Moore neighborhood). Uploaded once to GPU
-  storage buffers. Shader indexes `spawn_table[count]` / `keep_table[count]`.
-- Philox 2x32-10 counter-based RNG in WGSL: `rand_f32(grid_idx, step, cell_idx)`
-  gives deterministic per-cell randomness. Matching CPU reference in `philox2x32()`.
-- `rule_mode` switch in shader: 0 = hardcoded B3/S23 (fast path, no RNG),
-  1 = table-driven probabilistic. Mode auto-selected from tables.
-- Tests: `table_driven_matches_hardcoded` (mode 1 parity with mode 0),
-  `highlife_differs_from_gol` (B36/S23 via tables), `probabilistic_rules_use_rng`
-  (per-grid RNG seeding).
-- `GpuBatchConfig::b3s23()` convenience constructor for existing callers.
-
-### Phase 3: Complete
-- Early discard during screening: after each interval readback, grids that
-  went extinct (alive=0) or saturated (>90%) are zeroed in both ping-pong
-  buffers so subsequent steps skip them (no live cells → no output).
-- `GpuContext` shared across screener simulators: one Vulkan device instead
-  of one per (width, height, boundary) combination. `GpuSimulator::with_context`
-  accepts `Rc<GpuContext>` for sharing.
-
-### Remaining work
-
-**Phase 4: GPU-side analysis**:
-- Parallel connected components (label propagation or union-find)
-- Would eliminate CPU re-simulation for pattern classification
-
-### Architecture
-
-```
-CPU (lab.rs)                          GPU (blade compute)
-┌──────────────┐                     ┌──────────────────────┐
-│ Selection     │──── upload ────>   │ Grid buffer          │
-│ Mutation      │    (N soups)       │ [N × W × H] bits     │
-│ Fitness eval  │                    │                       │
-│              │<── readback ────   │ Stats buffer          │
-│              │    (stats only)    │ [N × {alive, births,  │
-│              │                    │   spatial_var}]        │
-└──────────────┘                     └──────────────────────┘
-                                      │
-                                      │ dispatch K times
-                                      ▼
-                                     ┌──────────────────────┐
-                                     │ CA step shader        │
-                                     │ workgroup per grid    │
-                                     │ thread per cell       │
-                                     └──────────────────────┘
-```
-
-### Performance Target
-- 128×128 grid, 1024 grids batched: ~16M cells per step
-- ~2000 experiments/second vs current ~1 experiment/second (1000x)
-
-## Roadmap: Detector Calibration → Rule Exploration
-
-### Phase A: Calibrate the detector (current focus)
-1. Fix pulsar/pseudo-object recognition (multi-component merging)
-2. Validate narrative tracker against R-pentomino expected behavior
-3. Test emergence metric against Gosper gun
-4. Deduplicate transient ship counting (trajectory hash)
-
-### Phase B: Complete GPU integration
-1. ~~Batch K steps per submission, add Dead boundary support~~ done
-2. ~~Multi-fidelity funnel: GPU screening → CPU detailed analysis~~ done
-3. ~~Table-driven rules + Philox RNG in shader (Phase 2)~~ done
-
-### Phase C: Rule-space exploration
-1. ~~Mean-field pre-filter: analytically discard rules with trivial fixed points~~ done
-2. ~~MAP-Elites over rule space: genome = spawn/keep/kernel, behavior = ladder scores~~ done
-3. ~~Landmarks: verify B3/S23, HighLife, Seeds, Day & Night score as expected~~ done
-4. ~~Interpolation: are "supports life" regions connected or isolated islands?~~ done (rule_transect)
-
-### Phase D: Rule-agnostic emergence metrics
-1. ~~Damage spreading (Derrida): twin grids, 1-cell perturbation, track Hamming divergence~~ done
-2. ~~Spacetime complexity: Shannon entropy of block densities + temporal autocorrelation~~ done
-3. ~~Shift cross-correlation: detect translating structures without rule-specific classification~~ done
-4. Stimulus-response: perturb stabilized system, measure response locality
-
-### Phase E: Critical surface mapping — done
-1. ~~High-resolution transects (41 points, 96×96, 8-seed, 2000 steps)~~ done
-2. ~~2D slices: spawn[2]×spawn[3] and spawn[3]×spawn[6] at 21×21~~ done
-3. ~~Multi-seed averaging (4-8 seeds per measurement point)~~ done
-4. ~~Position-seeded probabilistic Derrida (splitmix64 hash of step×y×x)~~ done
-5. ~~Critical surface search: 1000 random viable rules cataloged~~ done
-6. ~~Parallelize transects, slices, critical search (std::thread::scope)~~ done
-
-Key findings:
-- GoL spreading_rate ≈ 1.074 at high resolution (96×96, 8 seeds); HighLife ≈ 1.078
-  (nearly indistinguishable — transition at t≈0.525 adds B6)
-- **Sharp phase transitions**: 2D slices show discontinuous Derrida jumps (0.4→0.8→0.9),
-  suggesting first-order phase transitions in rule space, not smooth gradients
-- **Complexity peaks at viability boundary**: The highest complexity scores (7.3-7.8)
-  occur right where a rule barely supports life — the transition from extinction to
-  sustained dynamics. The "edge of emergence" is literally the survival threshold.
-- Two classes of critical rules discovered:
-  - **GoL-like** (Derrida ≈ 1.00, e.g. critical-rule3): recognizable patterns
-    (blinkers, blocks), low complexity (1.4-1.5), sparse (7-10% alive)
-  - **Novel** (Derrida ≈ 1.08-1.11, e.g. critical-rule7): no classified patterns,
-    higher complexity (3.8-4.1), dense (25-27%), spawn[0]=0.91 + broad survival
-- Criticality alone doesn't predict pattern formation: true criticality (λ≈1.0) with
-  GoL-like rules produces familiar objects, while slightly supercritical novel rules
-  produce unclassified but structured dynamics
-- 2D slice spawn[2]×spawn[3] (GoL keep): 4 quadrants — ordered (both low), edge
-  (one high), chaotic (both high). Complexity peak at the border between extinct
-  and sustained (spawn[3]≈0.10, spawn[2]≈0.75-0.95).
-- GoL→HighLife transect: complexity decreases monotonically from 4.5 to 2.5 as
-  HighLife character increases — B6 adds chaos without adding structure
-- **1000-rule critical surface survey** (96×96, 8 seeds, 2000 steps, ~20 min parallel):
-  - 617/1000 pass mean-field filter, 573 have measurable Derrida signal
-  - Phase distribution: 132 ordered (23%), **421 critical (73%)**, 20 chaotic (3.5%)
-  - 422 rules score ≥ 80 criticality; avg complexity 2.79, max complexity **9.58**
-  - Top-10 most critical rules (score 98-99) have λ ∈ [0.96, 1.03], low alive (6-22%)
-  - **Criticality is the dominant regime**: 73% of viable rules are near-critical,
-    suggesting that the critical surface is not a thin boundary but the bulk of
-    viable rule space. Rules that sustain life are overwhelmingly near-critical.
-  - Higher complexity (3-4.4) appears at slightly sub-critical spreading rates (λ≈0.96)
-
-### Phase F: Directed critical-surface search — in progress
-1. ~~Gradient descent toward λ=1~~ done — converges in 5-10 steps from HighLife,
-   but finds "dead" critical rules (alive≈0). Adaptive learning rate helps stability.
-2. ~~Binary search on transects~~ done — finds exact critical interpolation between
-   ordered/chaotic pairs. GoL↔B2345/S2345 yields complexity 6.2 near λ=1.13.
-3. ~~CMA-ES evolution (criticality × complexity)~~ done — population 16, 10 gens.
-   Found complexity **10.8** (exceeds 9.58 random survey max) at λ=1.13, alive=0.27.
-   Best rule: spawn[3]=0.77, keep[0,1,2,3,5,6] — broad probabilistic survival.
-4. ~~Critical manifold tracing~~ done — perturb toward higher complexity, Newton-correct
-   back to λ=1. Stays near-critical for 5-6 steps before drifting. Damped Newton needed.
-
-Key learnings:
-- CMA-ES is the most effective: finds higher complexity than random search in minutes
-- Gradient descent finds criticality reliably but converges to extinction boundary
-- The *interesting* region is criticality + viable population (alive > 1%)
-- Manifold tracing is theoretically cleanest but numerically unstable due to
-  measurement noise at low-res grid sizes
-
-### Phase G: Remaining exploration
-1. Test novel critical rules for pattern formation (still lifes, oscillators, ships)
-2. Longer simulations (10K+ steps) to check for methuselah-like transients
-3. Compare narrative richness of novel critical rules vs GoL
-4. Run CMA-ES with larger population (64+) and more generations (50+) for deeper search
-5. Map critical surface in higher dimensions (vary 3+ parameters simultaneously)
-6. Use parallelized search to run 10K+ sample surveys with finer mean-field binning
+- Plantec et al. — *Flow-Lenia: Towards open-ended evolution in cellular automata
+  through mass conservation and parameter localization* (arXiv:2212.07906).
+- Chan, B. — *Lenia: Biology of Artificial Life* (2019).
+- Moroz, M. — *Reintegration tracking* (2020).
+- *MaCE: General Mass Conserving Dynamics for Cellular Automata* (arXiv:2507.12306).
+- Mordvintsev et al. — *Particle Lenia* (2022).
+- Kumar, Stanley et al. — *Automating the Search for Artificial Life with
+  Foundation Models* (ASAL) (arXiv:2412.17799, 2024).
+- Bedau, M. & Packard, N. — evolutionary activity statistics.
+- Packard, N. & McCaskill, J. — *Open-Endedness in Genelife* (*Artificial Life*
+  30(3), 2024).
