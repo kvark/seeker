@@ -2,3 +2,4 @@
 .DS_Store
 /*.ron
 /data/active/
+/data/*.gif
