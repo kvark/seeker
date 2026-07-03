@@ -3,6 +3,7 @@ pub mod emergence;
 pub mod flow_lenia;
 pub mod grid;
 pub mod harness;
+pub mod search;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod lab;

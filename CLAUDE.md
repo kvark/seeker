@@ -88,8 +88,13 @@ Current (M-γ):
   `RunSummary` behavior fingerprint for F2.
 - `examples/flow_lenia.rs` — headless run: mass-drift + center-of-mass drift
   report, animated GIF export.
+- `src/search.rs` — outer-loop search (F2). MAP-Elites illumination over the
+  Flow-Lenia rule genome; harness metrics as behavior descriptors; batched
+  parallel evaluation. Finds rules instead of hand-tuning them.
 - `examples/measure.rs` — the harness in action: metric time series + run
   summary.
+- `examples/search.rs` — F2 illumination: runs MAP-Elites, prints the behavior
+  map and the elite rules in notable regions.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -132,9 +137,15 @@ Each is gated on a **measured** property, not eyeballing.
   Bedau–Packard evolutionary activity statistics (need a heritable component to
   track → arrives with M-γ-1 parameter localization); optional VLM interestingness
   oracle. This is what lets us *make claims* instead of vibes.
-- **F2 — Outer-loop search.** MAP-Elites / illumination over rule + energy
-  parameters, harness metrics as behavior descriptors. GPU throughput (batch many
-  worlds) is the unfair advantage.
+- **F2 — Outer-loop search.** 🟡 In progress. `src/search.rs` — MAP-Elites
+  illumination over a 7-gene Flow-Lenia rule genome (growth μ/σ, ring peak/width,
+  dt, θ_A, ramp n); behavior descriptors = harness `RunSummary` (concentration ×
+  activity); quality = a liveness score (persistent, dynamic, non-degenerate).
+  Batched parallel evaluation via `thread::scope`. Every genome runs from the
+  same fixed soup, so behavior reflects the rule. GPU throughput (batch many
+  worlds) is the unfair advantage — pure-CPU scalar convolution is the cost floor,
+  so the CPU search stays at modest grid/horizon and leans on parallelism.
+  Energy-parameter axes arrive with M-γ-2.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation,
   energy, sources, parameter localization, state continuity, dimensionality;
   measure the effect on *sustained novelty*. Converts intuition into necessity
