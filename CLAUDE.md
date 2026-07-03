@@ -78,8 +78,18 @@ Current (M-γ):
   continuous field, ring-kernel convolution, Lenia growth, Sobel gradients, flow
   assembly, reintegration-tracking transport (bilinear scatter, exact mass
   conservation). This is the ground truth to validate a GPU port against.
+- `src/harness.rs` — measurement harness (F1). Intrinsic metrics over a raw
+  `&[f32]` field (substrate-agnostic — matter, energy, detritus, GPU readback):
+  field stats (total, occupancy, Shannon entropy + a localization/concentration
+  score, peak, variance), connected-component blob detection (toroidal
+  8-connectivity, per-blob cell count / mass / circular-mean centroid), temporal
+  activity (per-step L1 change), and a `Tracker` that matches blobs across frames
+  to recover a velocity distribution. `measure_run` folds a run into a
+  `RunSummary` behavior fingerprint for F2.
 - `examples/flow_lenia.rs` — headless run: mass-drift + center-of-mass drift
   report, animated GIF export.
+- `examples/measure.rs` — the harness in action: metric time series + run
+  summary.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -115,10 +125,13 @@ Each is gated on a **measured** property, not eyeballing.
 
 ## Followups (the phased program)
 
-- **F1 — Measurement harness (early, maybe before M-γ-2).** Reductions for total
-  mass/energy, mass-distribution entropy, connected-component count/sizes, velocity
-  distribution; Bedau–Packard evolutionary activity statistics; optional VLM
-  interestingness oracle. This is what lets us *make claims* instead of vibes.
+- **F1 — Measurement harness (early, maybe before M-γ-2).** 🟡 In progress. Done:
+  intrinsic field metrics in `src/harness.rs` — total mass, occupancy, entropy +
+  concentration, connected-component count/sizes, activity, and blob-tracked
+  velocity distribution, folded into a `RunSummary` behavior fingerprint. Deferred:
+  Bedau–Packard evolutionary activity statistics (need a heritable component to
+  track → arrives with M-γ-1 parameter localization); optional VLM interestingness
+  oracle. This is what lets us *make claims* instead of vibes.
 - **F2 — Outer-loop search.** MAP-Elites / illumination over rule + energy
   parameters, harness metrics as behavior descriptors. GPU throughput (batch many
   worlds) is the unfair advantage.
