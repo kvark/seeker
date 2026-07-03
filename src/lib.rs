@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod emergence;
 pub mod flow_lenia;
 pub mod grid;
+pub mod harness;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod lab;

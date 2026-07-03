@@ -152,6 +152,20 @@ impl World {
         self.a.iter().map(|&v| v as f64).sum()
     }
 
+    /// Per-cell total concentration (summed over channels), row-major `w×h`.
+    /// This is the field the measurement harness reduces over.
+    pub fn mass_field(&self) -> Vec<f32> {
+        let cells = self.w * self.h;
+        let mut out = vec![0.0f32; cells];
+        for c in 0..self.params.channels {
+            let base = c * cells;
+            for (i, v) in out.iter_mut().enumerate() {
+                *v += self.a[base + i];
+            }
+        }
+        out
+    }
+
     /// Fraction of cells whose total concentration exceeds `thresh`.
     pub fn occupied_fraction(&self, thresh: f32) -> f32 {
         let cells = self.w * self.h;
