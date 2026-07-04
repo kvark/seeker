@@ -138,8 +138,14 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
   real-time at 512²; reproduce a known spatially-localized pattern (SLP).
 - **M-γ-1** — parameter localization + multi-species. Seed random parameters; confirm coexistence
   and rule mixing.
-- **M-γ-2** — energy economy v0 (§3). Does energy competition change *which* patterns persist?
-  First real test of intrinsic selection.
+- **M-γ-2** — energy economy v0 (§3). ✅ CPU reference done (`src/flow_lenia.rs`
+  `EnergyParams`/`enable_energy`, `examples/energy.rs`). Does energy competition change
+  *which* patterns persist? **Yes, measured:** from one seed, a fed world tracks pure
+  Flow-Lenia (9 blobs, activity ~1.1e-3, peak speed ~0.9) while a starved world collapses
+  and freezes (4 blobs, activity ~1e-4, peak speed ~0.01); mass conserved to ~1e-6 in
+  both. First real test of intrinsic selection — passed. (Ordering note: built before
+  M-γ-1 parameter localization, at the human's request. Coupling is single-species for now;
+  per-parameter selection lands once genotypes advect with the mass.)
 - **M-γ-3** — closed-loop detritus recycling. Look for sustained, non-collapsing ecosystems.
 
 ---
@@ -209,9 +215,15 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
 ## 9. Open decisions I need from you
 
 1. **Energy coupling:** multiplicative gate on growth vs additive; renewable vs finite sources.
-   (v0 default: multiplicative + renewable.)
+   ~~(v0 default: multiplicative + renewable.)~~ **Decided for M-γ-2 v0:** multiplicative gate
+   `g(E)=E/(E+K)` applied to the *whole* affinity field (not just its positive part — in
+   Flow-Lenia the affinity gradient drives transport, so gating the whole thing throttles the
+   organizing flow and lets anti-crowding disperse unfed matter); renewable sources; one shared
+   energy field. Revisit additive/per-channel/gate-floor after M-γ-1 + F2.
 2. **Death model:** break strict conservation (simple) vs closed-loop detritus recycling
-   (recommended, more work).
+   (recommended, more work). **Deferred to M-γ-3:** M-γ-2 has *no* mass-destroying death —
+   starvation removes the affinity flow (matter disperses, "death by dispersal") but mass is
+   still conserved. Detritus recycling is the M-γ-3 deliverable.
 3. **Advection:** port reintegration tracking, or start on MaCE's simpler scheme?
 4. **Backend split:** Blade-only for now, or stand up a Meganeura path for differentiable search
    at F2?
