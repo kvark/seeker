@@ -77,7 +77,11 @@ Current (M-γ):
 - `src/flow_lenia.rs` — Flow-Lenia CPU reference substrate. Multi-channel
   continuous field, ring-kernel convolution, Lenia growth, Sobel gradients, flow
   assembly, reintegration-tracking transport (bilinear scatter, exact mass
-  conservation). This is the ground truth to validate a GPU port against.
+  conservation). This is the ground truth to validate a GPU port against. Also
+  carries the **energy economy** (M-γ-2, `EnergyParams` + `enable_energy`): a
+  toggleable scalar energy field with renewable sources, diffusion, a saturating
+  growth gate `g(E)=E/(E+K)`, and consumption/maintenance costs. Off by default
+  (pure Flow-Lenia is the A/B baseline); mass stays conserved when it's on.
 - `src/harness.rs` — measurement harness (F1). Intrinsic metrics over a raw
   `&[f32]` field (substrate-agnostic — matter, energy, detritus, GPU readback):
   field stats (total, occupancy, Shannon entropy + a localization/concentration
@@ -95,6 +99,8 @@ Current (M-γ):
   summary.
 - `examples/search.rs` — F2 illumination: runs MAP-Elites, prints the behavior
   map and the elite rules in notable regions.
+- `examples/energy.rs` — M-γ-2 A/B: identical seed run pure vs starved vs fed,
+  harness fingerprints side by side, plus a two-panel (matter | energy) GIF.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -123,10 +129,21 @@ Each is gated on a **measured** property, not eyeballing.
   with the mass; confirm coexistence and rule mixing. Watch parameter-field
   variance — mass-weighted averaging is a low-pass filter that can homogenize the
   gene pool; consider softmax / quantized inheritance.
-- **M-γ-2 — energy economy v0.** First real test of intrinsic selection: does
-  energy competition change *which* patterns persist?
-- **M-γ-3 — closed-loop detritus recycling.** Look for sustained, non-collapsing
-  ecosystems.
+- **M-γ-2 — energy economy v0.** ✅ CPU done (`EnergyParams`, gate + sources +
+  diffusion + upkeep). First real test of intrinsic selection — and it changes
+  *which* patterns persist, measured through F1: from one seed, a fed world tracks
+  pure Flow-Lenia (9 blobs, activity ~1.1e-3, peak speed ~0.9) while a starved
+  world collapses and goes inert (4 blobs, activity ~1e-4, peak speed ~0.01);
+  mass conserved to ~1e-6 in both. **v0 decisions made:** multiplicative gate on
+  the *whole* affinity (its gradient drives transport, so gating it throttles the
+  organizing flow and anti-crowding disperses the rest — "death by dispersal");
+  renewable sources; single shared energy field; no mass-destroying death yet.
+  Open: does the gate want a floor / a per-channel field; tune costs via F2, not
+  by hand.
+- **M-γ-3 — closed-loop detritus recycling.** Next: energy-starved matter converts
+  to an inert detritus channel that decays back into `E`, so mass is conserved
+  across {live + detritus} and the world recycles instead of freezing. Look for
+  sustained, non-collapsing ecosystems.
 
 ## Followups (the phased program)
 

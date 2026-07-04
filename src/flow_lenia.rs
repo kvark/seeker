@@ -82,6 +82,79 @@ impl Default for FlowLeniaParams {
     }
 }
 
+/// Parameters of the **energy economy** (M-γ-2) — the M-γ research contribution.
+///
+/// Off by default. When enabled (`World::enable_energy`), a scalar energy field
+/// `E(x)` ("food") is layered on top of the mass-conserving substrate and coupled
+/// to the dynamics three ways:
+///
+/// 1. **Gate.** Matter's organizing affinity (the Lenia growth field, whose
+///    gradient drives transport) is scaled by a saturating function of local
+///    energy, `g(E) = E/(E+K)`. Where energy is scarce the affinity flow vanishes
+///    and only the ever-present anti-crowding term remains, so unfed matter loses
+///    the pull that holds it together and disperses — death-by-dispersal, the
+///    precursor to the actual detritus death of M-γ-3.
+/// 2. **Consumption.** Building structure costs energy: wherever mass accumulates
+///    (`ΔA > 0` after transport), energy is drawn down proportionally.
+/// 3. **Maintenance.** Merely staying organized costs energy proportional to local
+///    mass, every step.
+///
+/// Energy is replenished by localized renewable **sources** (`add_source`) and
+/// spreads by **diffusion**, so exploitable gradients form. Energy is *not*
+/// conserved (it is a flow, sourced and dissipated); **mass remains conserved**
+/// across the matter channels exactly as before — gating only reshapes flow, and
+/// death/recycling (which would move mass into a detritus channel) is deferred to
+/// M-γ-3. The point: patterns whose localized behavior lets them find and hold
+/// energy persist; others starve. Selection becomes a consequence of the economy,
+/// not a fitness function we wrote.
+#[derive(Clone, Debug)]
+pub struct EnergyParams {
+    /// Diffusion coefficient `D` for the energy Laplacian, per step. Spreads
+    /// energy away from sources so gradients form. Keep `D ≤ 0.25` for stability
+    /// of the explicit 5-point update. `0` = no diffusion.
+    pub diffusion: f32,
+    /// Per-cell storage cap. Sources stop injecting past this; diffusion and
+    /// spending are clamped to `[0, capacity]`.
+    pub capacity: f32,
+    /// Half-saturation constant `K` of the growth gate `g(E) = E/(E+K)`. Growth
+    /// affinity runs at half strength when local energy equals `K`; small `K`
+    /// makes the economy permissive, large `K` makes energy the binding constraint.
+    pub gate_half: f32,
+    /// Energy spent per unit of matter *accumulated* at a cell in a step
+    /// (`ΔE −= consume·max(ΔA, 0)`): the price of building structure.
+    pub consume: f32,
+    /// Energy drained per unit of local mass per step (`ΔE −= maintain·A_Σ`): the
+    /// standing cost of staying organized.
+    pub maintain: f32,
+}
+
+impl Default for EnergyParams {
+    /// A v0 regime (multiplicative gate + renewable sources, the plan's default):
+    /// energy is a real but not overwhelming constraint, gradients form, and a
+    /// well-fed blob can pay its upkeep while an unfed one cannot.
+    fn default() -> Self {
+        Self {
+            diffusion: 0.15,
+            capacity: 4.0,
+            gate_half: 0.5,
+            consume: 0.15,
+            maintain: 0.004,
+        }
+    }
+}
+
+/// Internal state of the energy economy: parameters, the live energy field, the
+/// (static) per-cell source injection map, and a diffusion scratch buffer.
+struct Energy {
+    params: EnergyParams,
+    /// Energy concentration `E(x)`, row-major `w×h`.
+    field: Vec<f32>,
+    /// Per-cell renewable injection rate `S(x)` added each step (pre-cap).
+    source: Vec<f32>,
+    /// Scratch for the out-of-place diffusion pass.
+    scratch: Vec<f32>,
+}
+
 /// A precomputed kernel tap: an integer offset and its normalized weight.
 #[derive(Clone, Copy)]
 struct Tap {
@@ -101,8 +174,10 @@ pub struct World {
     kernel: Vec<Tap>,
     // Scratch buffers reused across steps to avoid per-step allocation.
     potential: Vec<f32>, // per-channel affinity U_i
-    total: Vec<f32>,     // A_Σ
+    total: Vec<f32>,     // A_Σ (pre-transport, this step)
     scratch: Vec<f32>,   // reintegration target for one channel
+    /// Optional energy economy (M-γ-2). `None` = pure Flow-Lenia (M-γ-0/1).
+    energy: Option<Energy>,
 }
 
 impl World {
@@ -116,6 +191,7 @@ impl World {
             potential: vec![0.0; cells * params.channels],
             total: vec![0.0; cells],
             scratch: vec![0.0; cells],
+            energy: None,
             kernel,
             w,
             h,
@@ -133,6 +209,68 @@ impl World {
 
     pub fn params(&self) -> &FlowLeniaParams {
         &self.params
+    }
+
+    /// Enable the energy economy (M-γ-2) with the given parameters. The energy
+    /// field starts empty; add sources with [`add_source`](Self::add_source) and
+    /// optionally an initial charge with [`charge_energy`](Self::charge_energy).
+    /// Idempotent-ish: re-enabling replaces the parameters but resets the field.
+    pub fn enable_energy(&mut self, params: EnergyParams) {
+        let cells = self.w * self.h;
+        self.energy = Some(Energy {
+            params,
+            field: vec![0.0; cells],
+            source: vec![0.0; cells],
+            scratch: vec![0.0; cells],
+        });
+    }
+
+    /// Whether the energy economy is active. When `false`, this is pure
+    /// Flow-Lenia — the A/B baseline every experiment can compare against.
+    pub fn energy_enabled(&self) -> bool {
+        self.energy.is_some()
+    }
+
+    /// Read-only view of the energy field, or `None` if the economy is disabled.
+    /// Substrate-agnostic — feed straight into the measurement harness.
+    pub fn energy_field(&self) -> Option<&[f32]> {
+        self.energy.as_ref().map(|e| e.field.as_slice())
+    }
+
+    /// Total energy currently stored across the world (not conserved; sourced and
+    /// dissipated). `None` if the economy is disabled.
+    pub fn total_energy(&self) -> Option<f64> {
+        self.energy
+            .as_ref()
+            .map(|e| e.field.iter().map(|&v| v as f64).sum())
+    }
+
+    /// Add a localized renewable energy source: a smooth Gaussian bump of
+    /// per-step injection rate centered at `(cx, cy)`, peak `rate`, width
+    /// `radius`. Accumulates with existing sources. No-op if energy is disabled.
+    pub fn add_source(&mut self, cx: f32, cy: f32, radius: f32, rate: f32) {
+        let (w, h) = (self.w, self.h);
+        let Some(energy) = self.energy.as_mut() else { return };
+        let inv = 1.0 / (2.0 * radius * radius);
+        for y in 0..h {
+            for x in 0..w {
+                let dx = torus_delta(x as f32, cx, w as f32);
+                let dy = torus_delta(y as f32, cy, h as f32);
+                let g = rate * (-(dx * dx + dy * dy) * inv).exp();
+                energy.source[y * w + x] += g;
+            }
+        }
+    }
+
+    /// Set a uniform initial energy charge across the field (clamped to capacity).
+    /// No-op if energy is disabled.
+    pub fn charge_energy(&mut self, level: f32) {
+        if let Some(energy) = self.energy.as_mut() {
+            let cap = energy.params.capacity;
+            for v in energy.field.iter_mut() {
+                *v = level.clamp(0.0, cap);
+            }
+        }
     }
 
     /// Read-only view of one channel's concentration field.
@@ -286,7 +424,10 @@ impl World {
         let channels = self.params.channels;
 
         // 1 & 2. Potential (kernel * A) → affinity U_i via growth mapping.
-        //        Also accumulate total mass A_Σ.
+        //        Also accumulate total mass A_Σ. If the energy economy is on, the
+        //        positive part of affinity is gated by local energy g(E)=E/(E+K):
+        //        starved matter loses the pull that concentrates it into structure.
+        let (mu, sigma) = (self.params.growth_mu, self.params.growth_sigma);
         for v in self.total.iter_mut() {
             *v = 0.0;
         }
@@ -301,7 +442,17 @@ impl World {
                         acc += self.a[base + sy * w + sx] * tap.w;
                     }
                     let idx = y * w + x;
-                    self.potential[base + idx] = growth(acc, self.params.growth_mu, self.params.growth_sigma);
+                    let mut u = growth(acc, mu, sigma);
+                    if let Some(e) = &self.energy {
+                        // Throttle the organizing affinity by local energy. Its
+                        // gradient is what drives transport, so scaling it down
+                        // starves matter of the flow that concentrates it — and
+                        // the anti-crowding term (always on) then disperses what
+                        // energy can no longer hold together.
+                        let ev = e.field[idx];
+                        u *= ev / (ev + e.params.gate_half);
+                    }
+                    self.potential[base + idx] = u;
                     self.total[idx] += self.a[base + idx];
                 }
             }
@@ -358,6 +509,65 @@ impl World {
                 }
             }
             self.a[base..base + cells].copy_from_slice(&self.scratch);
+        }
+
+        // 5. Energy economy (M-γ-2), if enabled: spend on growth + maintenance,
+        //    inject from sources, diffuse. `self.total` still holds pre-transport
+        //    A_Σ, so ΔA is recoverable against the just-updated matter.
+        self.update_energy();
+    }
+
+    /// Update the energy field one step: consumption (`ΔA > 0`), maintenance
+    /// (`∝ A_Σ`), renewable source injection, then diffusion. Mass is untouched —
+    /// this only spends and spreads energy. No-op if the economy is disabled.
+    fn update_energy(&mut self) {
+        if self.energy.is_none() {
+            return;
+        }
+        let (w, h, cells) = (self.w, self.h, self.w * self.h);
+        let channels = self.params.channels;
+
+        // Pointwise spend + source, reading pre-transport A_Σ from `self.total`
+        // and post-transport A_Σ from `self.a`. Kept as a separate borrow scope so
+        // the diffusion pass below can borrow the energy field freely.
+        {
+            let energy = self.energy.as_mut().unwrap();
+            let (consume, maintain, cap) =
+                (energy.params.consume, energy.params.maintain, energy.params.capacity);
+            for i in 0..cells {
+                let mut a_new = 0.0f32;
+                for c in 0..channels {
+                    a_new += self.a[c * cells + i];
+                }
+                let delta = a_new - self.total[i]; // ΔA_Σ at this cell
+                let mut e = energy.field[i];
+                e -= consume * delta.max(0.0); // building structure costs energy
+                e -= maintain * a_new; // upkeep costs energy
+                e += energy.source[i]; // renewable injection
+                energy.field[i] = e.clamp(0.0, cap);
+            }
+        }
+
+        // Diffusion: explicit 5-point Laplacian, toroidal, out-of-place.
+        let energy = self.energy.as_mut().unwrap();
+        let d = energy.params.diffusion;
+        if d > 0.0 {
+            let cap = energy.params.capacity;
+            let f = &energy.field;
+            let s = &mut energy.scratch;
+            for y in 0..h {
+                let ym = wrap(y as i32 - 1, h);
+                let yp = wrap(y as i32 + 1, h);
+                for x in 0..w {
+                    let xm = wrap(x as i32 - 1, w);
+                    let xp = wrap(x as i32 + 1, w);
+                    let c = f[y * w + x];
+                    let lap = f[y * w + xm] + f[y * w + xp] + f[ym * w + x] + f[yp * w + x]
+                        - 4.0 * c;
+                    s[y * w + x] = (c + d * lap).clamp(0.0, cap);
+                }
+            }
+            std::mem::swap(&mut energy.field, &mut energy.scratch);
         }
     }
 }
@@ -528,5 +738,112 @@ mod tests {
         let (cx, cy) = world.center_of_mass().unwrap();
         assert!((cx - 20.0).abs() < 1.5, "cx off: {cx}");
         assert!((cy - 44.0).abs() < 1.5, "cy off: {cy}");
+    }
+
+    #[test]
+    fn energy_disabled_by_default() {
+        let world = World::new(16, 16, test_params());
+        assert!(!world.energy_enabled());
+        assert!(world.energy_field().is_none());
+        assert!(world.total_energy().is_none());
+    }
+
+    #[test]
+    fn mass_conserved_with_energy_on() {
+        // The energy layer gates and spends *energy*; it must never touch the
+        // mass invariant. Death/recycling (which would move mass) is M-γ-3.
+        let mut world = World::new(64, 64, test_params());
+        world.enable_energy(EnergyParams::default());
+        world.charge_energy(2.0);
+        world.add_source(32.0, 32.0, 10.0, 0.3);
+        world.seed_blob(0, 32.0, 32.0, 6.0, 0.9);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        world.seed_random_patch(&mut rng, 0, 20.0, 40.0, 8.0, 0.5);
+
+        let initial = world.total_mass();
+        assert!(initial > 0.0);
+        for step in 0..200 {
+            world.step();
+            let drift = (world.total_mass() - initial).abs() / initial;
+            assert!(drift < 1e-4, "mass drifted by {drift} at step {step} with energy on");
+        }
+    }
+
+    #[test]
+    fn source_replenishes_and_upkeep_drains_energy() {
+        // A world with matter but no source bleeds energy (maintenance +
+        // consumption); an otherwise identical world with a source refills it.
+        let build = |with_source: bool| {
+            let mut w = World::new(48, 48, test_params());
+            w.enable_energy(EnergyParams::default());
+            w.charge_energy(1.0);
+            w.seed_blob(0, 24.0, 24.0, 6.0, 0.9);
+            if with_source {
+                w.add_source(24.0, 24.0, 10.0, 0.5);
+            }
+            w
+        };
+        let mut drained = build(false);
+        let mut fed = build(true);
+        let e0 = drained.total_energy().unwrap();
+        for _ in 0..60 {
+            drained.step();
+            fed.step();
+        }
+        let e_drained = drained.total_energy().unwrap();
+        let e_fed = fed.total_energy().unwrap();
+        assert!(e_drained < e0, "unsourced energy should fall: {e0} → {e_drained}");
+        assert!(e_fed > e_drained, "sourced world should hold more energy: {e_fed} vs {e_drained}");
+    }
+
+    #[test]
+    fn energy_gating_selects_which_structure_persists() {
+        // Same seed, same physics — only the economy differs. Fed matter (sitting
+        // on a renewable source) keeps its organizing affinity and stays a live,
+        // moving, multi-blob structure; starved matter (energy ≈ 0 → gate ≈ 0)
+        // loses the affinity flow, goes inert, and its structure collapses.
+        //
+        // This is the M-γ-2 claim, measured through the F1 harness: energy
+        // competition changes *which* patterns persist — activity and motility,
+        // not just a static snapshot — with no fitness function in sight.
+        use crate::harness::measure_run;
+
+        let seed = |w: &mut World| {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+            w.seed_blob(0, 48.0, 48.0, 8.0, 0.95);
+            w.seed_blob(0, 30.0, 64.0, 6.0, 0.9);
+            w.seed_random_patch(&mut rng, 0, 70.0, 30.0, 8.0, 0.5);
+        };
+
+        let mut fed = World::new(96, 96, test_params());
+        fed.enable_energy(EnergyParams::default());
+        fed.charge_energy(2.0);
+        fed.add_source(48.0, 48.0, 16.0, 0.5);
+        seed(&mut fed);
+
+        let mut starved = World::new(96, 96, test_params());
+        starved.enable_energy(EnergyParams::default());
+        // No charge, no source: the gate stays near zero everywhere.
+        seed(&mut starved);
+
+        let (fed_sum, _) = measure_run(&mut fed, 200, 20, 0.05, 8.0);
+        let (starved_sum, _) = measure_run(&mut starved, 200, 20, 0.05, 8.0);
+
+        // Mass is untouched by the economy in both.
+        assert!(fed_sum.mass_drift < 1e-4 && starved_sum.mass_drift < 1e-4);
+        // Fed stays dynamic; starved freezes (the gap is ~10× — assert a safe 3×).
+        assert!(
+            fed_sum.mean_activity > starved_sum.mean_activity * 3.0,
+            "fed should stay dynamic: activity {} vs starved {}",
+            fed_sum.mean_activity,
+            starved_sum.mean_activity
+        );
+        // Fed keeps more distinct structures alive at the end.
+        assert!(
+            fed_sum.final_components > starved_sum.final_components,
+            "fed should keep more structure: {} vs {}",
+            fed_sum.final_components,
+            starved_sum.final_components
+        );
     }
 }
