@@ -81,7 +81,12 @@ Current (M-γ):
   carries the **energy economy** (M-γ-2, `EnergyParams` + `enable_energy`): a
   toggleable scalar energy field with renewable sources, diffusion, a saturating
   growth gate `g(E)=E/(E+K)`, and consumption/maintenance costs. Off by default
-  (pure Flow-Lenia is the A/B baseline); mass stays conserved when it's on.
+  (pure Flow-Lenia is the A/B baseline); mass stays conserved when it's on. And
+  **parameter localization** (M-γ-1, `enable_genome`): the growth genome `(μ, σ)`
+  becomes a per-cell field that advects with the mass through the same transport
+  (mass-weighted average on merge), so heterogeneous rules coexist and mix in one
+  channel. Single-channel v0; toggleable; `mu_stats` exposes the gene-pool
+  variance (homogenization watch).
 - `src/harness.rs` — measurement harness (F1). Intrinsic metrics over a raw
   `&[f32]` field (substrate-agnostic — matter, energy, detritus, GPU readback):
   field stats (total, occupancy, Shannon entropy + a localization/concentration
@@ -101,6 +106,9 @@ Current (M-γ):
   map and the elite rules in notable regions.
 - `examples/energy.rs` — M-γ-2 A/B: identical seed run pure vs starved vs fed,
   harness fingerprints side by side, plus a two-panel (matter | energy) GIF.
+- `examples/species.rs` — M-γ-1 multi-species: genome territories under a shared
+  soup; tracks μ variance (coexistence) and blend fraction (mixing); GIF colors
+  species by hue (μ) and mass by brightness.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -125,10 +133,18 @@ Each is gated on a **measured** property, not eyeballing.
   seeded blobs self-organize into persistent localized structure. GPU port (Blade)
   and moving-SLP tuning are the open items — *tuning belongs to the search harness
   (F1/F2), not hand-tuning* (see §Discipline).
-- **M-γ-1 — parameter localization + multi-species.** Advect a parameter field
-  with the mass; confirm coexistence and rule mixing. Watch parameter-field
-  variance — mass-weighted averaging is a low-pass filter that can homogenize the
-  gene pool; consider softmax / quantized inheritance.
+- **M-γ-1 — parameter localization + multi-species.** ✅ CPU done (`enable_genome`,
+  per-cell growth `(μ, σ)` advected with the mass by mass-weighted average;
+  `examples/species.rs`). **Coexistence confirmed:** three species with distinct μ
+  persist together over 600 steps, mass-weighted μ variance flat (~2.8e-4), mass
+  conserved to ~2e-6. **Mixing confirmed but modest:** blend fraction (mass at μ in
+  *neither* seed) rises 0 → ~1% monotonically where structures merge — the
+  mass-weighted average is real, but the default regime makes static, non-migrating
+  spots, so contact is limited. Strong mixing wants motile species → an F2 tuning
+  target, *not* hand-tuning (see §Discipline). Homogenization watch (risk #3): with
+  static spots the low-pass barely bites; revisit softmax/quantized inheritance once
+  species move and collide. **v0 scope:** single matter channel (per-channel
+  genomes deferred); only `(μ, σ)` localized (kernel still global).
 - **M-γ-2 — energy economy v0.** ✅ CPU done (`EnergyParams`, gate + sources +
   diffusion + upkeep). First real test of intrinsic selection — and it changes
   *which* patterns persist, measured through F1: from one seed, a fed world tracks

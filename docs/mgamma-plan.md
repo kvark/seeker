@@ -136,8 +136,16 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
 
 - **M-γ-0** — vanilla Flow-Lenia on Blade, single species. Mass conserved to `ε` numerically;
   real-time at 512²; reproduce a known spatially-localized pattern (SLP).
-- **M-γ-1** — parameter localization + multi-species. Seed random parameters; confirm coexistence
-  and rule mixing.
+- **M-γ-1** — parameter localization + multi-species. ✅ CPU reference done
+  (`src/flow_lenia.rs` `enable_genome`/`paint_genome`/`seed_species`/`mu_stats`,
+  `examples/species.rs`). Growth genome `(μ, σ)` localized into a per-cell field advected
+  with the mass by mass-weighted average (same reintegration-tracking scatter). **Coexistence
+  confirmed:** three distinct-μ species persist 600 steps, μ variance flat (~2.8e-4), mass
+  conserved ~2e-6. **Mixing confirmed, modest:** blend fraction 0 → ~1% where structures merge —
+  the low-pass average is real but the default static-SLP regime limits contact; strong mixing
+  needs motile species (F2 tuning, not hand-tuning). **v0 decisions:** mass-weighted averaging
+  (softmax/quantized inheritance deferred — the homogenization risk barely bites while spots are
+  static); single matter channel; only `(μ, σ)` localized, kernel still global.
 - **M-γ-2** — energy economy v0 (§3). ✅ CPU reference done (`src/flow_lenia.rs`
   `EnergyParams`/`enable_energy`, `examples/energy.rs`). Does energy competition change
   *which* patterns persist? **Yes, measured:** from one seed, a fed world tracks pure

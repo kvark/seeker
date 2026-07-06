@@ -163,6 +163,35 @@ struct Tap {
     w: f32,
 }
 
+/// Localized parameters (M-γ-1) — the "genome" carried by the matter itself.
+///
+/// When enabled (`World::enable_genome`), the growth center `μ` and width `σ`
+/// become per-cell fields that **advect with the mass** through the same
+/// reintegration-tracking transport: each cell's growth mapping uses its *local*
+/// `(μ, σ)`, and when transported mass lands on a cell the new parameters are the
+/// **mass-weighted average** of what arrived. Heterogeneous rules therefore
+/// coexist, compete, and mix in one field — this is what makes the substrate
+/// multi-species.
+///
+/// Single matter channel only for v0 (see `enable_genome`): the genome rides
+/// channel 0's flow. Multi-channel localization needs per-channel genomes (mass
+/// in different channels flows differently) — deferred.
+///
+/// **Watch the variance (risk #3).** Mass-weighted averaging on merge is a
+/// low-pass filter on the gene pool; left unchecked it homogenizes species into
+/// their blend. `mu_stats` exposes the mass-weighted mean/variance so the collapse
+/// is measurable rather than assumed.
+struct Genome {
+    /// Per-cell growth center `μ`, row-major `w×h`.
+    mu: Vec<f32>,
+    /// Per-cell growth width `σ`.
+    sigma: Vec<f32>,
+    /// Advection accumulators: mass-weighted sums scattered during transport,
+    /// divided by the new per-cell mass to recover the averaged parameter.
+    mu_acc: Vec<f32>,
+    sigma_acc: Vec<f32>,
+}
+
 /// A continuous, mass-conserving Flow-Lenia world.
 pub struct World {
     w: usize,
@@ -178,6 +207,8 @@ pub struct World {
     scratch: Vec<f32>,   // reintegration target for one channel
     /// Optional energy economy (M-γ-2). `None` = pure Flow-Lenia (M-γ-0/1).
     energy: Option<Energy>,
+    /// Optional localized parameters (M-γ-1). `None` = single global rule.
+    genome: Option<Genome>,
 }
 
 impl World {
@@ -192,6 +223,7 @@ impl World {
             total: vec![0.0; cells],
             scratch: vec![0.0; cells],
             energy: None,
+            genome: None,
             kernel,
             w,
             h,
@@ -271,6 +303,98 @@ impl World {
                 *v = level.clamp(0.0, cap);
             }
         }
+    }
+
+    /// Enable **localized parameters** (M-γ-1): the growth genome `(μ, σ)` becomes
+    /// a per-cell field that advects with the mass. The field is initialized to
+    /// the world's global `growth_mu`/`growth_sigma`; paint distinct species with
+    /// [`paint_genome`](Self::paint_genome) or [`seed_species`](Self::seed_species).
+    ///
+    /// # Panics
+    /// If the world has more than one matter channel — v0 rides channel 0's flow;
+    /// per-channel genomes are deferred.
+    pub fn enable_genome(&mut self) {
+        assert_eq!(
+            self.params.channels, 1,
+            "localized parameters (M-γ-1) are single-channel in v0"
+        );
+        let cells = self.w * self.h;
+        self.genome = Some(Genome {
+            mu: vec![self.params.growth_mu; cells],
+            sigma: vec![self.params.growth_sigma; cells],
+            mu_acc: vec![0.0; cells],
+            sigma_acc: vec![0.0; cells],
+        });
+    }
+
+    /// Whether localized parameters are active.
+    pub fn genome_enabled(&self) -> bool {
+        self.genome.is_some()
+    }
+
+    /// Read-only view of the per-cell growth-center field `μ(x)`, or `None`.
+    pub fn mu_field(&self) -> Option<&[f32]> {
+        self.genome.as_ref().map(|g| g.mu.as_slice())
+    }
+
+    /// Read-only view of the per-cell growth-width field `σ(x)`, or `None`.
+    pub fn sigma_field(&self) -> Option<&[f32]> {
+        self.genome.as_ref().map(|g| g.sigma.as_slice())
+    }
+
+    /// Paint a species' genome: hard-set the local growth `(μ, σ)` for every cell
+    /// within `radius` of `(cx, cy)`. Seed matter with the same footprint so the
+    /// genome has mass to ride. No-op if the genome is disabled.
+    pub fn paint_genome(&mut self, cx: f32, cy: f32, radius: f32, mu: f32, sigma: f32) {
+        let (w, h) = (self.w, self.h);
+        let Some(g) = self.genome.as_mut() else { return };
+        for y in 0..h {
+            for x in 0..w {
+                let dx = torus_delta(x as f32, cx, w as f32);
+                let dy = torus_delta(y as f32, cy, h as f32);
+                if dx * dx + dy * dy <= radius * radius {
+                    let idx = y * w + x;
+                    g.mu[idx] = mu;
+                    g.sigma[idx] = sigma;
+                }
+            }
+        }
+    }
+
+    /// Convenience for the multi-species demo: paint a species genome *and* seed a
+    /// matching Gaussian blob of matter on channel 0 in one call.
+    pub fn seed_species(&mut self, cx: f32, cy: f32, radius: f32, amp: f32, mu: f32, sigma: f32) {
+        self.paint_genome(cx, cy, radius * 1.5, mu, sigma);
+        self.seed_blob(0, cx, cy, radius, amp);
+    }
+
+    /// Mass-weighted mean and variance of the growth center `μ` over the occupied
+    /// matter — the M-γ-1 diversity signal. Variance well above zero means
+    /// multiple rules coexist; variance collapsing toward zero is the gene pool
+    /// homogenizing (risk #3). Returns `(mean, variance)`, or `None` if the genome
+    /// is disabled. `(0, 0)` when there is no mass.
+    pub fn mu_stats(&self) -> Option<(f32, f32)> {
+        let g = self.genome.as_ref()?;
+        let cells = self.w * self.h;
+        let mut m = 0.0f64;
+        let mut mean = 0.0f64;
+        for i in 0..cells {
+            let a = self.a[i] as f64;
+            m += a;
+            mean += a * g.mu[i] as f64;
+        }
+        if m <= 0.0 {
+            return Some((0.0, 0.0));
+        }
+        mean /= m;
+        let mut var = 0.0f64;
+        for i in 0..cells {
+            let a = self.a[i] as f64;
+            let d = g.mu[i] as f64 - mean;
+            var += a * d * d;
+        }
+        var /= m;
+        Some((mean as f32, var as f32))
     }
 
     /// Read-only view of one channel's concentration field.
@@ -413,11 +537,6 @@ impl World {
         }
     }
 
-    #[inline]
-    fn idx(&self, x: usize, y: usize) -> usize {
-        y * self.w + x
-    }
-
     /// Advance the world by one timestep. Total mass is invariant.
     pub fn step(&mut self) {
         let (w, h, cells) = (self.w, self.h, self.w * self.h);
@@ -428,6 +547,10 @@ impl World {
         //        positive part of affinity is gated by local energy g(E)=E/(E+K):
         //        starved matter loses the pull that concentrates it into structure.
         let (mu, sigma) = (self.params.growth_mu, self.params.growth_sigma);
+        // Move the genome out so its per-cell fields can be read here (growth) and
+        // its advection accumulators written below (transport) without borrowing
+        // all of `self`. Restored before the function returns.
+        let mut genome = self.genome.take();
         for v in self.total.iter_mut() {
             *v = 0.0;
         }
@@ -442,7 +565,13 @@ impl World {
                         acc += self.a[base + sy * w + sx] * tap.w;
                     }
                     let idx = y * w + x;
-                    let mut u = growth(acc, mu, sigma);
+                    // Localized growth (M-γ-1): matter here maps through its own
+                    // genome's (μ, σ) if the genome is on, else the global rule.
+                    let (gmu, gsig) = match &genome {
+                        Some(g) => (g.mu[idx], g.sigma[idx]),
+                        None => (mu, sigma),
+                    };
+                    let mut u = growth(acc, gmu, gsig);
                     if let Some(e) = &self.energy {
                         // Throttle the organizing affinity by local energy. Its
                         // gradient is what drives transport, so scaling it down
@@ -463,6 +592,15 @@ impl World {
         let theta = self.params.theta_a;
         let n = self.params.alpha_n;
         let max_flow = self.params.max_flow;
+        // Zero the genome advection accumulators for this step.
+        if let Some(g) = genome.as_mut() {
+            for v in g.mu_acc.iter_mut() {
+                *v = 0.0;
+            }
+            for v in g.sigma_acc.iter_mut() {
+                *v = 0.0;
+            }
+        }
         for c in 0..channels {
             let base = c * cells;
             for v in self.scratch.iter_mut() {
@@ -470,7 +608,8 @@ impl World {
             }
             for y in 0..h {
                 for x in 0..w {
-                    let m = self.a[base + self.idx(x, y)];
+                    let src = y * w + x;
+                    let m = self.a[base + src];
                     if m <= 0.0 {
                         continue;
                     }
@@ -478,7 +617,7 @@ impl World {
                     let (gux, guy) = sobel(&self.potential[base..base + cells], w, h, x, y);
                     let (gax, gay) = sobel(&self.total, w, h, x, y);
                     // Anti-crowding ramp: engage mass regulation as A_Σ → θ_A.
-                    let a_sigma = self.total[self.idx(x, y)];
+                    let a_sigma = self.total[src];
                     let alpha = ((a_sigma / theta).powf(n)).clamp(0.0, 1.0);
                     let fx = (1.0 - alpha) * gux - alpha * gax;
                     let fy = (1.0 - alpha) * guy - alpha * gay;
@@ -502,14 +641,51 @@ impl World {
                     let x1 = wrap(x0f as i32 + 1, w);
                     let y0 = wrap(y0f as i32, h);
                     let y1 = wrap(y0f as i32 + 1, h);
-                    self.scratch[y0 * w + x0] += m * (1.0 - wx) * (1.0 - wy);
-                    self.scratch[y0 * w + x1] += m * wx * (1.0 - wy);
-                    self.scratch[y1 * w + x0] += m * (1.0 - wx) * wy;
-                    self.scratch[y1 * w + x1] += m * wx * wy;
+                    let (d00, d01, d10, d11) =
+                        (y0 * w + x0, y0 * w + x1, y1 * w + x0, y1 * w + x1);
+                    let (m00, m01, m10, m11) = (
+                        m * (1.0 - wx) * (1.0 - wy),
+                        m * wx * (1.0 - wy),
+                        m * (1.0 - wx) * wy,
+                        m * wx * wy,
+                    );
+                    self.scratch[d00] += m00;
+                    self.scratch[d01] += m01;
+                    self.scratch[d10] += m10;
+                    self.scratch[d11] += m11;
+                    // Advect the genome (M-γ-1): the mass leaving `src` carries its
+                    // (μ, σ) to the same four cells, weighted by the moved mass.
+                    // Resolved into a mass-weighted average after the channel loop.
+                    if let Some(g) = genome.as_mut() {
+                        let (gmu, gsig) = (g.mu[src], g.sigma[src]);
+                        g.mu_acc[d00] += m00 * gmu;
+                        g.mu_acc[d01] += m01 * gmu;
+                        g.mu_acc[d10] += m10 * gmu;
+                        g.mu_acc[d11] += m11 * gmu;
+                        g.sigma_acc[d00] += m00 * gsig;
+                        g.sigma_acc[d01] += m01 * gsig;
+                        g.sigma_acc[d10] += m10 * gsig;
+                        g.sigma_acc[d11] += m11 * gsig;
+                    }
                 }
             }
             self.a[base..base + cells].copy_from_slice(&self.scratch);
         }
+
+        // Resolve the advected genome: each cell's new (μ, σ) is the mass-weighted
+        // average of what arrived. `self.scratch` holds channel 0's post-transport
+        // mass (single-channel invariant of the genome). Cells that received no
+        // mass keep their prior genome — irrelevant until matter returns.
+        if let Some(g) = genome.as_mut() {
+            for i in 0..cells {
+                let m = self.scratch[i];
+                if m > 1e-9 {
+                    g.mu[i] = g.mu_acc[i] / m;
+                    g.sigma[i] = g.sigma_acc[i] / m;
+                }
+            }
+        }
+        self.genome = genome;
 
         // 5. Energy economy (M-γ-2), if enabled: spend on growth + maintenance,
         //    inject from sources, diffuse. `self.total` still holds pre-transport
@@ -845,5 +1021,133 @@ mod tests {
             fed_sum.final_components,
             starved_sum.final_components
         );
+    }
+
+    // ---- M-γ-1: parameter localization -----------------------------------
+
+    #[test]
+    fn genome_disabled_by_default() {
+        let world = World::new(16, 16, test_params());
+        assert!(!world.genome_enabled());
+        assert!(world.mu_field().is_none());
+        assert!(world.mu_stats().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "single-channel")]
+    fn genome_rejects_multichannel() {
+        let mut params = test_params();
+        params.channels = 2;
+        let mut world = World::new(16, 16, params);
+        world.enable_genome();
+    }
+
+    #[test]
+    fn mass_conserved_with_genome() {
+        // Advecting the genome must not perturb the mass invariant: matter is
+        // still only moved by the same bilinear splat.
+        let mut world = World::new(64, 64, test_params());
+        world.enable_genome();
+        world.seed_species(28.0, 32.0, 6.0, 0.9, 0.13, 0.017);
+        world.seed_species(40.0, 34.0, 6.0, 0.9, 0.17, 0.017);
+        let initial = world.total_mass();
+        for step in 0..200 {
+            world.step();
+            let drift = (world.total_mass() - initial).abs() / initial;
+            assert!(drift < 1e-4, "mass drifted by {drift} at step {step} with genome on");
+        }
+    }
+
+    #[test]
+    fn uniform_genome_is_preserved_under_advection() {
+        // A world with one genome everywhere must keep exactly that genome: the
+        // mass-weighted average of identical parameters is that parameter, so
+        // advection injects no spurious drift or default values.
+        let mut world = World::new(64, 64, test_params());
+        world.enable_genome();
+        world.paint_genome(32.0, 32.0, 200.0, 0.16, 0.019); // whole world
+        world.seed_blob(0, 32.0, 32.0, 7.0, 0.95);
+        for _ in 0..100 {
+            world.step();
+        }
+        let (mean, var) = world.mu_stats().unwrap();
+        assert!((mean - 0.16).abs() < 1e-3, "μ mean drifted to {mean}");
+        assert!(var < 1e-6, "uniform genome grew variance {var}");
+    }
+
+    #[test]
+    fn species_coexist_without_homogenizing() {
+        // Three separated species with distinct μ persist together: the
+        // mass-weighted μ variance stays near its seeded value rather than
+        // collapsing toward a single blended rule (risk #3).
+        let mut world = World::new(96, 96, test_params());
+        world.enable_genome();
+        world.seed_species(28.0, 32.0, 7.0, 0.95, 0.13, 0.017);
+        world.seed_species(66.0, 34.0, 7.0, 0.95, 0.15, 0.017);
+        world.seed_species(48.0, 68.0, 7.0, 0.95, 0.17, 0.017);
+        let (_, v0) = world.mu_stats().unwrap();
+        assert!(v0 > 0.0);
+        for _ in 0..200 {
+            world.step();
+        }
+        let (_, v1) = world.mu_stats().unwrap();
+        assert!(
+            v1 > v0 * 0.5,
+            "gene pool homogenized: μ variance {v0} → {v1}"
+        );
+        // All three species still present: μ spread across the occupied field.
+        let (lo, hi) = occupied_mu_span(&world, 0.05);
+        assert!(hi - lo > 0.03, "species collapsed to one rule: μ span [{lo}, {hi}]");
+    }
+
+    #[test]
+    fn genomes_mix_where_matter_merges() {
+        // Rule mixing: where mass from two genomes lands on the same cell, the
+        // new genome is their mass-weighted average, so intermediate μ values —
+        // present in *neither* seed — appear. Background genome is 0.13 so any
+        // intermediate μ is a genuine advective blend, not a leftover default.
+        let mut world = World::new(64, 64, test_params());
+        world.enable_genome();
+        world.paint_genome(32.0, 32.0, 200.0, 0.13, 0.017); // whole world = 0.13
+        world.paint_genome(40.0, 32.0, 16.0, 0.17, 0.017); // right lobe = 0.17
+        let mut rng = rand::rngs::StdRng::seed_from_u64(4);
+        world.seed_random_patch(&mut rng, 0, 32.0, 32.0, 22.0, 0.6);
+
+        let blended_before = count_blended(&world, 0.05, 0.13, 0.17, 0.01);
+        assert_eq!(blended_before, 0, "seeds should be pure before any step");
+        for _ in 0..80 {
+            world.step();
+        }
+        let blended_after = count_blended(&world, 0.05, 0.13, 0.17, 0.01);
+        assert!(
+            blended_after > 0,
+            "no rule mixing: expected cells with intermediate μ, found none"
+        );
+    }
+
+    /// Min/max localized μ over cells carrying meaningful mass.
+    fn occupied_mu_span(world: &World, thresh: f32) -> (f32, f32) {
+        let mass = world.channel(0);
+        let mu = world.mu_field().unwrap();
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for (i, &m) in mass.iter().enumerate() {
+            if m > thresh {
+                lo = lo.min(mu[i]);
+                hi = hi.max(mu[i]);
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Count occupied cells whose μ is strictly between `a` and `b` by at least
+    /// `margin` on both sides — a genuine blend of the two seeded genomes.
+    fn count_blended(world: &World, thresh: f32, a: f32, b: f32, margin: f32) -> usize {
+        let mass = world.channel(0);
+        let mu = world.mu_field().unwrap();
+        let (lo, hi) = (a.min(b) + margin, a.max(b) - margin);
+        mass.iter()
+            .zip(mu)
+            .filter(|(&m, &u)| m > thresh && u > lo && u < hi)
+            .count()
     }
 }
