@@ -23,14 +23,14 @@
 //! Every genome is evaluated from the *same* fixed random soup, so differences
 //! reflect the rule, not the seed.
 
-use crate::flow_lenia::{FlowLeniaParams, KernelRing, World};
+use crate::flow_lenia::{EnergyParams, FlowLeniaParams, KernelRing, World};
 use crate::harness::{measure_run, RunSummary, Sample};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-/// Number of searchable genes.
+/// Number of searchable rule genes.
 pub const N_GENES: usize = 7;
-// Gene indices.
+// Rule-gene indices.
 const MU: usize = 0;
 const SIGMA: usize = 1;
 const PEAK: usize = 2;
@@ -39,10 +39,24 @@ const DT: usize = 4;
 const THETA: usize = 5;
 const ALPHA: usize = 6;
 
-/// A point in Flow-Lenia rule space.
+/// Number of searchable **energy-economy** genes (M-γ-2 parameters). Carried by
+/// every genome but only *used* under [`Objective::Motility`]'s sibling
+/// [`Objective::Metabolic`]; for the non-energy objectives they are inert
+/// passengers (mutated but never read), so they cost the search nothing.
+pub const N_ENERGY_GENES: usize = 4;
+// Energy-gene indices.
+const E_GATE: usize = 0; // gate half-saturation K
+const E_CONSUME: usize = 1; // energy per unit mass built
+const E_MAINTAIN: usize = 2; // energy per unit mass per step
+const E_DIFFUSE: usize = 3; // energy diffusion coefficient
+
+/// A point in Flow-Lenia rule space, plus its energy-economy genes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Genome {
+    /// The 7 rule genes (growth, kernel ring, dt, θ_A, ramp n).
     pub genes: [f32; N_GENES],
+    /// The 4 energy-economy genes. Only read under [`Objective::Metabolic`].
+    pub energy: [f32; N_ENERGY_GENES],
 }
 
 /// What the search rewards, and therefore which behavior it illuminates.
@@ -55,13 +69,29 @@ pub enum Objective {
     /// This is what M-γ-1 needs: species that migrate and collide, so their
     /// localized genomes actually mix instead of sitting in static spots.
     Motility,
+    /// Life sustained under the **energy economy** (M-γ-2). The genome's energy
+    /// genes are switched on, the world is charged and fed by a localized source,
+    /// and quality rewards structure that persists despite gating + upkeep. This
+    /// is how F2 co-searches the economy: only rules+economies that can pay their
+    /// way survive, so the map illuminates *which metabolisms sustain life*. Map
+    /// axis: activity (as for liveness, so the two maps are directly comparable).
+    Metabolic,
 }
 
-/// Per-gene search bounds.
+impl Objective {
+    /// Whether this objective reads the genome's energy genes.
+    fn uses_energy(self) -> bool {
+        matches!(self, Objective::Metabolic)
+    }
+}
+
+/// Per-gene search bounds, for both the rule and the energy genes.
 #[derive(Clone, Debug)]
 pub struct Bounds {
     pub lo: [f32; N_GENES],
     pub hi: [f32; N_GENES],
+    pub energy_lo: [f32; N_ENERGY_GENES],
+    pub energy_hi: [f32; N_ENERGY_GENES],
 }
 
 impl Default for Bounds {
@@ -69,31 +99,49 @@ impl Default for Bounds {
         //             μ      σ      peak   width  dt     θ_A    n
         let lo = [0.02f32, 0.003, 0.15, 0.03, 0.02, 0.5, 1.0];
         let hi = [0.40f32, 0.120, 0.95, 0.35, 0.30, 6.0, 4.0];
-        Bounds { lo, hi }
+        // Energy bounds keep the economy *biting*: gate half-saturation stays
+        // well above zero (energy always meaningfully throttles growth) and
+        // maintenance is never quite free, so a discovered metabolism genuinely
+        // depends on energy rather than escaping the constraint.
+        //                    gate  consume maintain diffuse
+        let energy_lo = [0.30f32, 0.00, 0.001, 0.00];
+        let energy_hi = [2.00f32, 0.50, 0.020, 0.25];
+        Bounds { lo, hi, energy_lo, energy_hi }
     }
 }
 
 impl Genome {
-    /// Uniformly random genome within bounds.
+    /// Uniformly random genome within bounds (both rule and energy genes).
     pub fn random<R: Rng>(rng: &mut R, b: &Bounds) -> Self {
         let mut genes = [0.0f32; N_GENES];
         for (i, gene) in genes.iter_mut().enumerate() {
             *gene = rng.gen_range(b.lo[i]..=b.hi[i]);
         }
-        Genome { genes }
+        let mut energy = [0.0f32; N_ENERGY_GENES];
+        for (i, gene) in energy.iter_mut().enumerate() {
+            *gene = rng.gen_range(b.energy_lo[i]..=b.energy_hi[i]);
+        }
+        Genome { genes, energy }
     }
 
-    /// Gaussian mutation: perturb each gene by `sigma × (hi−lo)`, clamped.
+    /// Gaussian mutation: perturb each gene by `sigma × (hi−lo)`, clamped. Both
+    /// rule and energy genes are perturbed; the energy ones are inert unless the
+    /// objective reads them, so this is safe for every objective.
     pub fn mutate<R: Rng>(&self, rng: &mut R, b: &Bounds, sigma: f32) -> Self {
         let mut genes = self.genes;
         for (i, gene) in genes.iter_mut().enumerate() {
             let range = b.hi[i] - b.lo[i];
             *gene = (*gene + gaussian(rng) * sigma * range).clamp(b.lo[i], b.hi[i]);
         }
-        Genome { genes }
+        let mut energy = self.energy;
+        for (i, gene) in energy.iter_mut().enumerate() {
+            let range = b.energy_hi[i] - b.energy_lo[i];
+            *gene = (*gene + gaussian(rng) * sigma * range).clamp(b.energy_lo[i], b.energy_hi[i]);
+        }
+        Genome { genes, energy }
     }
 
-    /// Map the genome to substrate parameters (single channel, one ring).
+    /// Map the rule genes to substrate parameters (single channel, one ring).
     pub fn to_params(&self, kernel_radius: usize) -> FlowLeniaParams {
         let g = &self.genes;
         FlowLeniaParams {
@@ -106,6 +154,20 @@ impl Genome {
             theta_a: g[THETA],
             alpha_n: g[ALPHA],
             max_flow: 1.0,
+        }
+    }
+
+    /// Map the energy genes to an [`EnergyParams`]. Capacity is fixed (the source
+    /// rate and geometry live in the evaluation, not the genome), so the search
+    /// tunes the *coupling* — gate, consumption, maintenance, diffusion.
+    pub fn to_energy_params(&self) -> EnergyParams {
+        let e = &self.energy;
+        EnergyParams {
+            diffusion: e[E_DIFFUSE],
+            capacity: 4.0,
+            gate_half: e[E_GATE],
+            consume: e[E_CONSUME],
+            maintain: e[E_MAINTAIN],
         }
     }
 }
@@ -159,10 +221,21 @@ pub struct Evaluated {
 pub fn evaluate(genome: &Genome, cfg: &EvalConfig) -> Evaluated {
     let params = genome.to_params(cfg.kernel_radius);
     let mut world = World::new(cfg.grid_size, cfg.grid_size, params);
-    // Fixed initial condition: a central soup patch. Same for all genomes, so
-    // behavior differences are attributable to the rule.
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
     let c = cfg.grid_size as f32 * 0.5;
+    // Under the metabolic objective the genome's energy economy is switched on:
+    // the world is charged and fed by a single central renewable source (fixed
+    // rate/geometry — the search tunes the coupling, not the food supply), so
+    // only rules+economies that can organize and pay upkeep near the vent persist.
+    if cfg.objective.uses_energy() {
+        let ep = genome.to_energy_params();
+        let cap = ep.capacity;
+        world.enable_energy(ep);
+        world.charge_energy(cap * 0.5);
+        world.add_source(c, c, cfg.grid_size as f32 / 4.0, 0.5);
+    }
+    // Fixed initial condition: a central soup patch. Same for all genomes, so
+    // behavior differences are attributable to the rule (and economy).
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
     world.seed_random_patch(&mut rng, 0, c, c, cfg.grid_size as f32 / 3.0, 0.6);
 
     let (summary, samples) =
@@ -182,6 +255,13 @@ pub fn evaluate(genome: &Genome, cfg: &EvalConfig) -> Evaluated {
         Objective::Motility => (
             quality_motility(&summary, final_concentration, final_occupied),
             (summary.mean_concentration, summary.mean_speed),
+        ),
+        // Under the economy, liveness *is* the metabolic fitness: a structure can
+        // only stay alive to the final step if its economy sustains it. The map
+        // axis matches liveness so "with vs without economy" is comparable.
+        Objective::Metabolic => (
+            quality_liveness(&summary, final_concentration, final_occupied),
+            (summary.mean_concentration, summary.mean_activity),
         ),
     };
     Evaluated {
@@ -517,7 +597,7 @@ mod tests {
     fn insert_keeps_higher_quality() {
         let mut m = MapElites::new(MapConfig::default());
         let mk = |q: f32, bd: (f32, f32)| Evaluated {
-            genome: Genome { genes: [0.0; N_GENES] },
+            genome: Genome { genes: [0.0; N_GENES], energy: [0.0; N_ENERGY_GENES] },
             summary: RunSummary::default(),
             quality: q,
             bd,
@@ -558,6 +638,56 @@ mod tests {
         assert_eq!(move_.bd.1, move_.summary.mean_speed);
         // x-descriptor (concentration) is shared, so the maps are comparable.
         assert_eq!(live.bd.0, move_.bd.0);
+    }
+
+    #[test]
+    fn random_and_mutated_energy_genes_stay_in_bounds() {
+        let b = Bounds::default();
+        let mut rng = StdRng::seed_from_u64(21);
+        for _ in 0..200 {
+            let g = Genome::random(&mut rng, &b);
+            for i in 0..N_ENERGY_GENES {
+                assert!(g.energy[i] >= b.energy_lo[i] && g.energy[i] <= b.energy_hi[i]);
+            }
+            let m = g.mutate(&mut rng, &b, 0.5);
+            for i in 0..N_ENERGY_GENES {
+                assert!(m.energy[i] >= b.energy_lo[i] && m.energy[i] <= b.energy_hi[i], "e-gene {i} OOB");
+            }
+        }
+    }
+
+    #[test]
+    fn metabolic_eval_conserves_mass_with_energy_on() {
+        // The economy spends energy, never mass: a metabolic evaluation must keep
+        // the mass invariant just like a pure run.
+        let cfg = EvalConfig {
+            grid_size: 32,
+            steps: 80,
+            sample_every: 20,
+            objective: Objective::Metabolic,
+            ..Default::default()
+        };
+        let mut rng = StdRng::seed_from_u64(5);
+        let g = Genome::random(&mut rng, &Bounds::default());
+        let e = evaluate(&g, &cfg);
+        assert!(e.summary.mass_drift < 1e-4, "drift {}", e.summary.mass_drift);
+        assert!(e.quality >= 0.0);
+    }
+
+    #[test]
+    fn metabolism_genes_change_fitness() {
+        // Same rule, two economies: a generous one (cheap upkeep, permissive gate)
+        // should sustain structure at least as well as a punishing one (heavy
+        // upkeep, energy-hungry gate). Proves the economy genes do selective work.
+        use crate::flow_lenia::FlowLeniaParams;
+        let d = FlowLeniaParams::default();
+        let rule = [d.growth_mu, d.growth_sigma, d.rings[0].peak, d.rings[0].width, d.dt, d.theta_a, d.alpha_n];
+        let generous = Genome { genes: rule, energy: [0.35, 0.02, 0.001, 0.15] };
+        let punishing = Genome { genes: rule, energy: [2.0, 0.5, 0.02, 0.0] };
+        let cfg = EvalConfig { grid_size: 48, steps: 200, objective: Objective::Metabolic, ..Default::default() };
+        let qg = evaluate(&generous, &cfg).quality;
+        let qp = evaluate(&punishing, &cfg).quality;
+        assert!(qg >= qp, "generous economy {qg} should not lose to punishing {qp}");
     }
 
     #[test]

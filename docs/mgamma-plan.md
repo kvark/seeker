@@ -194,9 +194,13 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
   localized genomes coexist but barely mix in the static default regime; rather than
   hand-tune a mover (the designer trap), F2 *searches* for one — a coherent glider (mean
   speed ~0.36, peak ~7, ~1.3 blobs) — and dropping it into a two-species world lifts mixing
-  to ~5% blend vs ~0% for the static rule. Next: energy-parameter axes (M-γ-2), and
-  ASAL/E&E-style VLM-goal search. GPU throughput (batch many worlds) is the unfair
-  advantage; the pure-CPU search stays at modest grid/horizon and leans on parallelism.
+  to ~5% blend vs ~0% for the static rule. **F2 also extended to M-γ-2:** genomes now carry
+  energy-economy genes (gate/consume/maintain/diffusion) and the `Metabolic` objective
+  evaluates in a charged, source-fed world, so the search co-tunes the economy; it found a
+  metabolism that sustains a lively field when fed (~33 blobs, activity ~0.07) and collapses
+  to one inert lump when starved — intrinsic selection, discovered not imposed
+  (`examples/metabolism.rs`). Next: ASAL/E&E-style VLM-goal search. GPU throughput (batch
+  many worlds) is the unfair advantage; the pure-CPU search stays at modest grid/horizon.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation, energy, sources,
   parameter localization, state continuity (discretize), dimensionality (2D↔3D); measure the
   effect on *sustained novelty*. This converts intuition into **necessity claims** — the thing
