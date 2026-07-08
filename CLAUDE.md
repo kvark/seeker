@@ -99,9 +99,13 @@ Current (M-γ):
   report, animated GIF export.
 - `src/search.rs` — outer-loop search (F2). MAP-Elites illumination over the
   Flow-Lenia rule genome; harness metrics as behavior descriptors; batched
-  parallel evaluation. Finds rules instead of hand-tuning them. Two objectives:
-  `Liveness` (concentration × activity) and `Motility` (concentration × speed —
-  rewards coherent, persistent, *translating* structure, i.e. gliders).
+  parallel evaluation. Finds rules instead of hand-tuning them. Three objectives:
+  `Liveness` (concentration × activity), `Motility` (concentration × speed —
+  rewards coherent, persistent, *translating* structure, i.e. gliders), and
+  `Metabolic` (M-γ-2 co-search — the genome also carries energy-economy genes
+  (gate/consume/maintain/diffusion), evaluated in a charged, source-fed world;
+  quality is liveness *under* the economy, so only metabolisms that pay their
+  upkeep survive).
 - `examples/measure.rs` — the harness in action: metric time series + run
   summary.
 - `examples/search.rs` — F2 illumination: runs MAP-Elites, prints the behavior
@@ -114,6 +118,9 @@ Current (M-γ):
 - `examples/motility.rs` — F2 → M-γ-1: searches for a motile species, then drops
   the discovered glider into a two-species world and measures the mixing uplift
   (movers collide → genomes blend) vs the static default rule.
+- `examples/metabolism.rs` — F2 → M-γ-2: searches rule + energy-economy genes for
+  a self-sustaining metabolism, then A/Bs the winner fed vs starved (fed thrives,
+  starved collapses); two-panel (matter | energy) GIF.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -179,15 +186,20 @@ Each is gated on a **measured** property, not eyeballing.
   illumination over a 7-gene Flow-Lenia rule genome (growth μ/σ, ring peak/width,
   dt, θ_A, ramp n); behavior descriptors = harness `RunSummary`; batched parallel
   evaluation via `thread::scope`; every genome runs from the same fixed soup, so
-  behavior reflects the rule. Two objectives now: `Liveness` (concentration ×
-  activity) and `Motility` (concentration × speed). **F2 closed the M-γ-1 loop:**
-  the motility search discovers a coherent glider (mean speed ~0.36, peak ~7,
-  ~1.3 blobs) with *no hand-tuning*; dropping it into a two-species M-γ-1 world
-  lifts mixing to ~5% blend vs ~0% for the static default rule under the same
-  collision protocol (`examples/motility.rs`). Movers collide → localized genomes
-  blend. GPU throughput (batch many worlds) is the unfair advantage — pure-CPU
-  scalar convolution is the cost floor, so the CPU search stays at modest
-  grid/horizon and leans on parallelism. Energy-parameter axes arrive with M-γ-2.
+  behavior reflects the rule. Three objectives: `Liveness` (concentration ×
+  activity), `Motility` (concentration × speed), `Metabolic` (energy-economy
+  co-search). **F2 closed the M-γ-1 loop:** the motility search discovers a
+  coherent glider (mean speed ~0.36, peak ~7, ~1.3 blobs) with *no hand-tuning*;
+  dropping it into a two-species M-γ-1 world lifts mixing to ~5% blend vs ~0% for
+  the static default rule (`examples/motility.rs`). **F2 also extended to M-γ-2:**
+  every genome now carries energy genes (gate/consume/maintain/diffusion) and the
+  `Metabolic` objective evaluates in a charged, source-fed world — the search
+  found a metabolism that when fed sustains a lively structured field (~33 blobs,
+  activity ~0.07) and when starved collapses to one inert lump (activity ~0), mass
+  conserved ~1e-7 both (`examples/metabolism.rs`). Intrinsic selection, co-tuned by
+  F2 rather than imposed. GPU throughput (batch many worlds) is the unfair
+  advantage — pure-CPU scalar convolution is the cost floor, so the CPU search
+  stays at modest grid/horizon and leans on parallelism.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation,
   energy, sources, parameter localization, state continuity, dimensionality;
   measure the effect on *sustained novelty*. Converts intuition into necessity
