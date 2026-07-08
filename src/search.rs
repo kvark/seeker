@@ -45,6 +45,18 @@ pub struct Genome {
     pub genes: [f32; N_GENES],
 }
 
+/// What the search rewards, and therefore which behavior it illuminates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Objective {
+    /// Persistent, dynamic, non-degenerate structure. Map axis: activity.
+    /// The default — a broad "what regimes exist at all" illumination.
+    Liveness,
+    /// Coherent, persistent, *moving* structure — gliders. Map axis: speed.
+    /// This is what M-γ-1 needs: species that migrate and collide, so their
+    /// localized genomes actually mix instead of sitting in static spots.
+    Motility,
+}
+
 /// Per-gene search bounds.
 #[derive(Clone, Debug)]
 pub struct Bounds {
@@ -108,6 +120,8 @@ pub struct EvalConfig {
     pub threshold: f32,
     /// Seed for the fixed initial soup (shared by every genome).
     pub seed: u64,
+    /// What to reward / illuminate.
+    pub objective: Objective,
 }
 
 impl Default for EvalConfig {
@@ -123,6 +137,7 @@ impl Default for EvalConfig {
             sample_every: 10,
             threshold: 0.05,
             seed: 20240703,
+            objective: Objective::Liveness,
         }
     }
 }
@@ -156,8 +171,19 @@ pub fn evaluate(genome: &Genome, cfg: &EvalConfig) -> Evaluated {
         .last()
         .map(|s: &Sample| (s.stats.concentration, s.stats.occupied_fraction))
         .unwrap_or((0.0, 0.0));
-    let quality = quality_of(&summary, final_concentration, final_occupied);
-    let bd = (summary.mean_concentration, summary.mean_activity);
+    // Quality and the map's y-descriptor both follow the objective; x stays
+    // concentration (how localized matter is) for both, so the two maps are
+    // directly comparable along their shared axis.
+    let (quality, bd) = match cfg.objective {
+        Objective::Liveness => (
+            quality_liveness(&summary, final_concentration, final_occupied),
+            (summary.mean_concentration, summary.mean_activity),
+        ),
+        Objective::Motility => (
+            quality_motility(&summary, final_concentration, final_occupied),
+            (summary.mean_concentration, summary.mean_speed),
+        ),
+    };
     Evaluated {
         genome: genome.clone(),
         summary,
@@ -170,12 +196,32 @@ pub fn evaluate(genome: &Genome, cfg: &EvalConfig) -> Evaluated {
 
 /// Liveness quality: reward persistent, dynamic, non-degenerate structure.
 /// Dead (dissipated to uniform / collapsed) or exploded (fills the grid) → low.
-fn quality_of(summary: &RunSummary, final_concentration: f32, final_occupied: f32) -> f32 {
+fn quality_liveness(summary: &RunSummary, final_concentration: f32, final_occupied: f32) -> f32 {
     let alive = final_concentration > 0.08 && final_occupied > 0.003 && final_occupied < 0.9;
     let persistence = if alive { 1.0 } else { 0.05 };
     // Sustained change is good; the tanh keeps runaway chaos from dominating.
     let dynamism = (summary.mean_activity * 200.0).tanh();
     persistence * (0.2 + dynamism)
+}
+
+/// Motility quality: reward a *coherent, persistent, translating* structure — a
+/// glider, not soup and not a static blob. Speed alone is untrustworthy (blob
+/// matching can jump), so it is gated on the structure staying localized and
+/// composed of few objects: real translation, not tracking noise.
+fn quality_motility(summary: &RunSummary, final_concentration: f32, final_occupied: f32) -> f32 {
+    let alive = final_concentration > 0.08 && final_occupied > 0.002 && final_occupied < 0.5;
+    if !alive {
+        return 0.02;
+    }
+    // Few coherent objects (a glider is ~1). Soup of many blobs is penalized.
+    let coherence = if summary.mean_components <= 1.0 {
+        1.0
+    } else {
+        (1.0 / summary.mean_components).max(0.1)
+    };
+    // Sustained center-of-mass drift, saturated so lucky spikes don't dominate.
+    let speed = (summary.mean_speed * 2.0).tanh();
+    0.05 + coherence * speed
 }
 
 /// Zero-mean, unit-variance Gaussian via Box–Muller.
@@ -484,6 +530,56 @@ mod tests {
         assert_eq!(m.filled(), 1);
         assert!(m.insert(mk(0.1, (0.5, 0.015))), "different cell");
         assert_eq!(m.filled(), 2);
+    }
+
+    #[test]
+    fn motility_quality_rewards_coherent_movement() {
+        // A coherent glider (one blob, drifting) must score above an equally
+        // persistent but stationary blob, and above a fast-but-fragmented soup.
+        let mover = RunSummary { mean_speed: 1.0, mean_components: 1.0, ..RunSummary::default() };
+        let still = RunSummary { mean_speed: 0.0, mean_components: 1.0, ..RunSummary::default() };
+        let soup = RunSummary { mean_speed: 1.0, mean_components: 30.0, ..RunSummary::default() };
+        // final_concentration/occupied chosen "alive" for all three.
+        let q = |s: &RunSummary| quality_motility(s, 0.2, 0.05);
+        assert!(q(&mover) > q(&still), "mover {} !> still {}", q(&mover), q(&still));
+        assert!(q(&mover) > q(&soup), "mover {} !> soup {}", q(&mover), q(&soup));
+    }
+
+    #[test]
+    fn motility_objective_uses_speed_descriptor() {
+        // Under the motility objective the map's y-descriptor is mean_speed;
+        // under liveness it is mean_activity. Same genome, different bd.y source.
+        let mut rng = StdRng::seed_from_u64(5);
+        let g = Genome::random(&mut rng, &Bounds::default());
+        let base = EvalConfig { grid_size: 32, steps: 60, sample_every: 15, ..Default::default() };
+        let live = evaluate(&g, &EvalConfig { objective: Objective::Liveness, ..base.clone() });
+        let move_ = evaluate(&g, &EvalConfig { objective: Objective::Motility, ..base });
+        assert_eq!(live.bd.1, live.summary.mean_activity);
+        assert_eq!(move_.bd.1, move_.summary.mean_speed);
+        // x-descriptor (concentration) is shared, so the maps are comparable.
+        assert_eq!(live.bd.0, move_.bd.0);
+    }
+
+    #[test]
+    fn motility_search_illuminates() {
+        // The motility search runs and fills cells just like the liveness one.
+        let cfg = SearchConfig {
+            eval: EvalConfig {
+                grid_size: 24,
+                steps: 40,
+                sample_every: 10,
+                objective: Objective::Motility,
+                ..Default::default()
+            },
+            map: MapConfig { res_x: 6, res_y: 6, x_range: (0.0, 0.6), y_range: (0.0, 3.0) },
+            init_batch: 16,
+            generations: 4,
+            batch: 8,
+            ..Default::default()
+        };
+        let archive = map_elites(&cfg);
+        assert!(archive.filled() >= 1);
+        assert!(archive.best().is_some());
     }
 
     #[test]
