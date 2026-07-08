@@ -186,11 +186,17 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
   velocity distribution; CPU-side **Bedau–Packard evolutionary activity statistics** + a
   novelty/diversity metric; optional frame export for an **ASAL-style VLM interestingness
   oracle**. Reusable standalone crate. This is what lets you *make claims* instead of vibes.
-- **F2 — Outer-loop search.** Quality-diversity (MAP-Elites) or ASAL-style
-  illumination/open-endedness search over rule + energy parameters, using harness metrics as
-  behavior descriptors. Prior art specific to this substrate: **E&E (Expedition & Expansion)**,
-  VLM-goal-driven search in Flow-Lenia. Your GPU throughput = batch many worlds in parallel —
-  this is your unfair advantage; most ALife researchers are compute-starved.
+- **F2 — Outer-loop search.** 🟡 In progress (`src/search.rs`, `examples/search.rs`,
+  `examples/motility.rs`). MAP-Elites illumination over a 7-gene Flow-Lenia rule genome,
+  harness `RunSummary` as behavior descriptors, batched parallel evaluation from a shared
+  fixed soup. Two objectives: `Liveness` (concentration × activity) and `Motility`
+  (concentration × speed). **The motility objective closed the M-γ-1 loop:** M-γ-1 showed
+  localized genomes coexist but barely mix in the static default regime; rather than
+  hand-tune a mover (the designer trap), F2 *searches* for one — a coherent glider (mean
+  speed ~0.36, peak ~7, ~1.3 blobs) — and dropping it into a two-species world lifts mixing
+  to ~5% blend vs ~0% for the static rule. Next: energy-parameter axes (M-γ-2), and
+  ASAL/E&E-style VLM-goal search. GPU throughput (batch many worlds) is the unfair
+  advantage; the pure-CPU search stays at modest grid/horizon and leans on parallelism.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation, energy, sources,
   parameter localization, state continuity (discretize), dimensionality (2D↔3D); measure the
   effect on *sustained novelty*. This converts intuition into **necessity claims** — the thing

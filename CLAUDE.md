@@ -99,7 +99,9 @@ Current (M-γ):
   report, animated GIF export.
 - `src/search.rs` — outer-loop search (F2). MAP-Elites illumination over the
   Flow-Lenia rule genome; harness metrics as behavior descriptors; batched
-  parallel evaluation. Finds rules instead of hand-tuning them.
+  parallel evaluation. Finds rules instead of hand-tuning them. Two objectives:
+  `Liveness` (concentration × activity) and `Motility` (concentration × speed —
+  rewards coherent, persistent, *translating* structure, i.e. gliders).
 - `examples/measure.rs` — the harness in action: metric time series + run
   summary.
 - `examples/search.rs` — F2 illumination: runs MAP-Elites, prints the behavior
@@ -109,6 +111,9 @@ Current (M-γ):
 - `examples/species.rs` — M-γ-1 multi-species: genome territories under a shared
   soup; tracks μ variance (coexistence) and blend fraction (mixing); GIF colors
   species by hue (μ) and mass by brightness.
+- `examples/motility.rs` — F2 → M-γ-1: searches for a motile species, then drops
+  the discovered glider into a two-species world and measures the mixing uplift
+  (movers collide → genomes blend) vs the static default rule.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -172,13 +177,17 @@ Each is gated on a **measured** property, not eyeballing.
   oracle. This is what lets us *make claims* instead of vibes.
 - **F2 — Outer-loop search.** 🟡 In progress. `src/search.rs` — MAP-Elites
   illumination over a 7-gene Flow-Lenia rule genome (growth μ/σ, ring peak/width,
-  dt, θ_A, ramp n); behavior descriptors = harness `RunSummary` (concentration ×
-  activity); quality = a liveness score (persistent, dynamic, non-degenerate).
-  Batched parallel evaluation via `thread::scope`. Every genome runs from the
-  same fixed soup, so behavior reflects the rule. GPU throughput (batch many
-  worlds) is the unfair advantage — pure-CPU scalar convolution is the cost floor,
-  so the CPU search stays at modest grid/horizon and leans on parallelism.
-  Energy-parameter axes arrive with M-γ-2.
+  dt, θ_A, ramp n); behavior descriptors = harness `RunSummary`; batched parallel
+  evaluation via `thread::scope`; every genome runs from the same fixed soup, so
+  behavior reflects the rule. Two objectives now: `Liveness` (concentration ×
+  activity) and `Motility` (concentration × speed). **F2 closed the M-γ-1 loop:**
+  the motility search discovers a coherent glider (mean speed ~0.36, peak ~7,
+  ~1.3 blobs) with *no hand-tuning*; dropping it into a two-species M-γ-1 world
+  lifts mixing to ~5% blend vs ~0% for the static default rule under the same
+  collision protocol (`examples/motility.rs`). Movers collide → localized genomes
+  blend. GPU throughput (batch many worlds) is the unfair advantage — pure-CPU
+  scalar convolution is the cost floor, so the CPU search stays at modest
+  grid/horizon and leans on parallelism. Energy-parameter axes arrive with M-γ-2.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation,
   energy, sources, parameter localization, state continuity, dimensionality;
   measure the effect on *sustained novelty*. Converts intuition into necessity
