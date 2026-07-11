@@ -256,11 +256,11 @@ pub fn evaluate(genome: &Genome, cfg: &EvalConfig) -> Evaluated {
             quality_motility(&summary, final_concentration, final_occupied),
             (summary.mean_concentration, summary.mean_speed),
         ),
-        // Under the economy, liveness *is* the metabolic fitness: a structure can
-        // only stay alive to the final step if its economy sustains it. The map
-        // axis matches liveness so "with vs without economy" is comparable.
+        // Under the economy, liveness *is* the metabolic fitness — but a *sharp*
+        // metabolism is a few coherent organisms at the vent, not a busy soup that
+        // merely happens to stay alive. quality_metabolic gates on coherence.
         Objective::Metabolic => (
-            quality_liveness(&summary, final_concentration, final_occupied),
+            quality_metabolic(&summary, final_concentration, final_occupied),
             (summary.mean_concentration, summary.mean_activity),
         ),
     };
@@ -302,6 +302,31 @@ fn quality_motility(summary: &RunSummary, final_concentration: f32, final_occupi
     // Sustained center-of-mass drift, saturated so lucky spikes don't dominate.
     let speed = (summary.mean_speed * 2.0).tanh();
     0.05 + coherence * speed
+}
+
+/// Metabolic quality: reward a *coherent, sustained* metabolism — a few organisms
+/// living off the vent, not a busy field that merely stays alive. This is the
+/// sharpener over plain liveness: `quality_liveness` rewarded a 33-blob soup
+/// because it was alive and active; here many components is penalized, so the
+/// search prefers one or two energy-fed organisms. Still gated on liveness (a
+/// starved collapse scores near zero) and on some sustained activity (a dead
+/// static lump is coherent but not *metabolizing*).
+fn quality_metabolic(summary: &RunSummary, final_concentration: f32, final_occupied: f32) -> f32 {
+    let alive = final_concentration > 0.08 && final_occupied > 0.002 && final_occupied < 0.5;
+    if !alive {
+        return 0.02;
+    }
+    // A sharp metabolism is a few coherent organisms; a couple is fine, a soup of
+    // many is not. Mirrors the motility coherence gate but tolerates up to ~2.
+    let coherence = if summary.mean_components <= 2.0 {
+        1.0
+    } else {
+        (2.0 / summary.mean_components).max(0.1)
+    };
+    // Some sustained, economy-driven change — enough to distinguish a living
+    // organism from an inert blob, saturated so chaos doesn't win.
+    let dynamism = (summary.mean_activity * 200.0).tanh();
+    0.05 + coherence * (0.2 + dynamism)
 }
 
 /// Zero-mean, unit-variance Gaussian via Box–Muller.
@@ -623,6 +648,22 @@ mod tests {
         let q = |s: &RunSummary| quality_motility(s, 0.2, 0.05);
         assert!(q(&mover) > q(&still), "mover {} !> still {}", q(&mover), q(&still));
         assert!(q(&mover) > q(&soup), "mover {} !> soup {}", q(&mover), q(&soup));
+    }
+
+    #[test]
+    fn metabolic_quality_prefers_coherent_over_busy() {
+        // The sharpener: a lively few-organism metabolism must beat a busy soup
+        // that is just as active (the old liveness quality scored them equally),
+        // and beat an inert static lump (coherent but not metabolizing).
+        let organism = RunSummary { mean_activity: 0.05, mean_components: 1.5, ..RunSummary::default() };
+        let soup = RunSummary { mean_activity: 0.05, mean_components: 30.0, ..RunSummary::default() };
+        let lump = RunSummary { mean_activity: 0.0, mean_components: 1.0, ..RunSummary::default() };
+        let q = |s: &RunSummary| quality_metabolic(s, 0.2, 0.05);
+        assert!(q(&organism) > q(&soup), "organism {} !> soup {}", q(&organism), q(&soup));
+        assert!(q(&organism) > q(&lump), "organism {} !> lump {}", q(&organism), q(&lump));
+        // And liveness would NOT separate organism from soup — confirming the gap.
+        let ql = |s: &RunSummary| quality_liveness(s, 0.2, 0.05);
+        assert!((ql(&organism) - ql(&soup)).abs() < 1e-6, "liveness should tie them");
     }
 
     #[test]
