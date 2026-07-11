@@ -93,7 +93,7 @@ impl Default for FlowLeniaParams {
 ///    energy, `g(E) = E/(E+K)`. Where energy is scarce the affinity flow vanishes
 ///    and only the ever-present anti-crowding term remains, so unfed matter loses
 ///    the pull that holds it together and disperses — death-by-dispersal, the
-///    precursor to the actual detritus death of M-γ-3.
+///    soft precursor to the explicit detritus death of M-γ-3 ([`DetritusParams`]).
 /// 2. **Consumption.** Building structure costs energy: wherever mass accumulates
 ///    (`ΔA > 0` after transport), energy is drawn down proportionally.
 /// 3. **Maintenance.** Merely staying organized costs energy proportional to local
@@ -102,10 +102,11 @@ impl Default for FlowLeniaParams {
 /// Energy is replenished by localized renewable **sources** (`add_source`) and
 /// spreads by **diffusion**, so exploitable gradients form. Energy is *not*
 /// conserved (it is a flow, sourced and dissipated); **mass remains conserved**
-/// across the matter channels exactly as before — gating only reshapes flow, and
-/// death/recycling (which would move mass into a detritus channel) is deferred to
-/// M-γ-3. The point: patterns whose localized behavior lets them find and hold
-/// energy persist; others starve. Selection becomes a consequence of the economy,
+/// across the matter channels exactly as before — gating only reshapes flow.
+/// Explicit death/recycling (matter moving into an inert detritus channel and
+/// back) is the M-γ-3 layer ([`DetritusParams`], `enable_detritus`), off by
+/// default here. The point: patterns whose localized behavior lets them find and
+/// hold energy persist; others starve. Selection becomes a consequence of the economy,
 /// not a fitness function we wrote.
 #[derive(Clone, Debug)]
 pub struct EnergyParams {
@@ -153,6 +154,59 @@ struct Energy {
     source: Vec<f32>,
     /// Scratch for the out-of-place diffusion pass.
     scratch: Vec<f32>,
+}
+
+/// Parameters of the **closed-loop detritus cycle** (M-γ-3) — death and recycling
+/// that keep the world turning over instead of freezing.
+///
+/// M-γ-2 starved matter to inertness ("death by dispersal") but nothing came back:
+/// once the energy ran out the world just stopped. M-γ-3 closes the loop with an
+/// inert **detritus** channel and two fluxes, both gated on the energy economy:
+///
+/// 1. **Death.** Where energy is scarce, live matter converts to detritus in place
+///    at a rate scaled by starvation `s = 1 − g(E) = K/(E+K)` (the complement of
+///    the growth gate — the same energy shortage that stops growth now also kills):
+///    `Δdet = death_rate · s · A_live`. Detritus does **not** flow, convolve, or
+///    grow — it is dead mass sitting where its owner died.
+/// 2. **Recycling.** Detritus decomposes back into the live channel at
+///    `recycle_matter · Det` per step, and each unit that decomposes **releases
+///    energy** into `E` (`recycle_energy` per unit matter) — dead matter becomes
+///    food, so the world is no longer solely fed by the external vent.
+///
+/// **Conservation.** Death and recycling only ever *move* matter between the live
+/// channel and detritus, so `Σ A_live + Σ Det` is conserved exactly (the released
+/// energy is a byproduct in the non-conserved `E` field, like a source). This is
+/// the M-γ invariant extended to {live + detritus}, and a unit test pins it.
+///
+/// Single matter channel, and detritus carries no genome (M-γ-1) in v0 — returned
+/// matter adopts whatever genome sits at its cell. Off unless `enable_detritus`.
+#[derive(Clone, Debug)]
+pub struct DetritusParams {
+    /// Max fraction of local live mass that dies to detritus per step, at full
+    /// starvation (`E → 0`). Scaled down by available energy via `s = K/(E+K)`.
+    pub death_rate: f32,
+    /// Fraction of local detritus that decomposes back into the live channel per
+    /// step. Small values make detritus a slow-release matter reservoir.
+    pub recycle_matter: f32,
+    /// Energy released into `E` per unit of matter decomposed (the "food" a
+    /// decomposing corpse yields). `0` = matter recycles but releases no energy.
+    pub recycle_energy: f32,
+}
+
+impl Default for DetritusParams {
+    /// A v0 regime: starved matter dies over ~tens of steps, detritus is a slow
+    /// reservoir that trickles matter back and releases food as it rots — fast
+    /// enough to reseed regrowth, slow enough to leave a visible detritus pool.
+    fn default() -> Self {
+        Self { death_rate: 0.05, recycle_matter: 0.01, recycle_energy: 0.5 }
+    }
+}
+
+/// Internal state of the detritus cycle: parameters and the inert detritus field.
+struct Detritus {
+    params: DetritusParams,
+    /// Dead mass `Det(x)`, row-major `w×h`. Inert: never flows, grows, or convolves.
+    field: Vec<f32>,
 }
 
 /// A precomputed kernel tap: an integer offset and its normalized weight.
@@ -207,6 +261,8 @@ pub struct World {
     scratch: Vec<f32>,   // reintegration target for one channel
     /// Optional energy economy (M-γ-2). `None` = pure Flow-Lenia (M-γ-0/1).
     energy: Option<Energy>,
+    /// Optional closed-loop detritus cycle (M-γ-3). `None` = no death/recycling.
+    detritus: Option<Detritus>,
     /// Optional localized parameters (M-γ-1). `None` = single global rule.
     genome: Option<Genome>,
 }
@@ -223,6 +279,7 @@ impl World {
             total: vec![0.0; cells],
             scratch: vec![0.0; cells],
             energy: None,
+            detritus: None,
             genome: None,
             kernel,
             w,
@@ -303,6 +360,45 @@ impl World {
                 *v = level.clamp(0.0, cap);
             }
         }
+    }
+
+    /// Enable the **closed-loop detritus cycle** (M-γ-3): starved matter dies into
+    /// an inert detritus channel that decomposes back into the live channel and
+    /// releases energy as it rots. See [`DetritusParams`]. Requires the energy
+    /// economy (death is triggered by energy scarcity). Re-enabling resets the
+    /// detritus field.
+    ///
+    /// # Panics
+    /// If the energy economy is disabled, or the world has more than one matter
+    /// channel (v0 is single-channel, matching the genome and metabolism layers).
+    pub fn enable_detritus(&mut self, params: DetritusParams) {
+        assert!(
+            self.energy.is_some(),
+            "detritus recycling (M-γ-3) needs the energy economy (death is energy-gated)"
+        );
+        assert_eq!(
+            self.params.channels, 1,
+            "detritus recycling (M-γ-3) is single matter channel in v0"
+        );
+        self.detritus = Some(Detritus { params, field: vec![0.0; self.w * self.h] });
+    }
+
+    /// Whether the detritus cycle (M-γ-3) is active.
+    pub fn detritus_enabled(&self) -> bool {
+        self.detritus.is_some()
+    }
+
+    /// Read-only view of the inert detritus field, or `None` if M-γ-3 is disabled.
+    pub fn detritus_field(&self) -> Option<&[f32]> {
+        self.detritus.as_ref().map(|d| d.field.as_slice())
+    }
+
+    /// Total dead mass currently held as detritus, or `None` if M-γ-3 is disabled.
+    /// The conserved M-γ-3 quantity is `total_mass() + total_detritus()`.
+    pub fn total_detritus(&self) -> Option<f64> {
+        self.detritus
+            .as_ref()
+            .map(|d| d.field.iter().map(|&v| v as f64).sum())
     }
 
     /// Enable **localized parameters** (M-γ-1): the growth genome `(μ, σ)` becomes
@@ -691,6 +787,11 @@ impl World {
         //    inject from sources, diffuse. `self.total` still holds pre-transport
         //    A_Σ, so ΔA is recoverable against the just-updated matter.
         self.update_energy();
+
+        // 6. Detritus cycle (M-γ-3), if enabled: kill starved matter into detritus
+        //    and decompose detritus back into the live channel + energy. Runs after
+        //    the energy update so death reads this step's post-injection energy.
+        self.update_detritus();
     }
 
     /// Update the energy field one step: consumption (`ΔA > 0`), maintenance
@@ -744,6 +845,38 @@ impl World {
                 }
             }
             std::mem::swap(&mut energy.field, &mut energy.scratch);
+        }
+    }
+
+    /// Update the detritus cycle one step (M-γ-3): starved live matter dies into
+    /// detritus, detritus decomposes back into the live channel and releases energy.
+    /// Matter only *moves* between the live channel and detritus, so
+    /// `Σ A_live + Σ Det` is conserved exactly. No-op unless M-γ-3 is enabled.
+    fn update_detritus(&mut self) {
+        // Both the detritus field and the energy field are needed; `enable_detritus`
+        // guarantees energy is present. These are disjoint fields of `self`, so the
+        // live channel `self.a` can be borrowed alongside them.
+        let (Some(det), Some(energy)) = (self.detritus.as_mut(), self.energy.as_mut()) else {
+            return;
+        };
+        let cells = self.w * self.h;
+        let k = energy.params.gate_half;
+        let cap = energy.params.capacity;
+        let DetritusParams { death_rate, recycle_matter, recycle_energy } = det.params;
+        for i in 0..cells {
+            // Death: the same energy shortage that closes the growth gate now kills.
+            // s = 1 − g(E) = K/(E+K) → 1 as E → 0, 0 when energy is plentiful.
+            let e = energy.field[i];
+            let starve = k / (e + k);
+            let dead = death_rate * starve * self.a[i];
+            self.a[i] -= dead;
+            let pool = det.field[i] + dead;
+            // Recycle: decomposition returns matter to the live channel (conserving
+            // {live + detritus}) and releases energy as a byproduct (a source term).
+            let back = recycle_matter * pool;
+            det.field[i] = pool - back;
+            self.a[i] += back;
+            energy.field[i] = (energy.field[i] + recycle_energy * back).min(cap);
         }
     }
 }
@@ -1020,6 +1153,96 @@ mod tests {
             "fed should keep more structure: {} vs {}",
             fed_sum.final_components,
             starved_sum.final_components
+        );
+    }
+
+    // ---- M-γ-3: closed-loop detritus recycling ---------------------------
+
+    #[test]
+    fn detritus_disabled_by_default() {
+        let mut world = World::new(16, 16, test_params());
+        assert!(!world.detritus_enabled());
+        assert!(world.detritus_field().is_none());
+        assert!(world.total_detritus().is_none());
+        // Enabling requires the energy economy.
+        world.enable_energy(EnergyParams::default());
+        world.enable_detritus(DetritusParams::default());
+        assert!(world.detritus_enabled());
+        assert_eq!(world.total_detritus(), Some(0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "needs the energy economy")]
+    fn detritus_requires_energy() {
+        let mut world = World::new(16, 16, test_params());
+        world.enable_detritus(DetritusParams::default());
+    }
+
+    #[test]
+    fn matter_conserved_across_live_and_detritus() {
+        // The M-γ invariant extended to M-γ-3: death and recycling only *move*
+        // matter between the live channel and detritus, so their sum is conserved
+        // exactly — even as a starved world sheds most of its live mass to detritus.
+        let mut world = World::new(64, 64, test_params());
+        world.enable_energy(EnergyParams::default());
+        world.enable_detritus(DetritusParams::default());
+        // Starved (no source, no charge) so death is vigorous; recycling churns.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        world.seed_blob(0, 32.0, 32.0, 8.0, 0.95);
+        world.seed_random_patch(&mut rng, 0, 20.0, 44.0, 8.0, 0.6);
+
+        let initial = world.total_mass() + world.total_detritus().unwrap();
+        assert!(initial > 0.0);
+        let mut saw_detritus = false;
+        for step in 0..200 {
+            world.step();
+            let total = world.total_mass() + world.total_detritus().unwrap();
+            let drift = (total - initial).abs() / initial;
+            assert!(drift < 1e-4, "live+detritus drifted by {drift} at step {step}");
+            if world.total_detritus().unwrap() > initial * 0.05 {
+                saw_detritus = true;
+            }
+        }
+        // The starved world really did die into a detritus pool (not a no-op).
+        assert!(saw_detritus, "expected starvation to build a detritus pool");
+    }
+
+    #[test]
+    fn fed_matter_stays_alive_starved_matter_becomes_detritus() {
+        // The M-γ-3 payoff: with death+recycling on, a fed world keeps its mass in
+        // the *live* channel, while a starved world converts most of it to detritus.
+        let build = |fed: bool| {
+            let mut w = World::new(80, 80, test_params());
+            w.enable_energy(EnergyParams::default());
+            w.enable_detritus(DetritusParams::default());
+            if fed {
+                w.charge_energy(2.0);
+                w.add_source(40.0, 40.0, 14.0, 0.5);
+            }
+            w.seed_blob(0, 40.0, 40.0, 9.0, 0.95);
+            w
+        };
+        let mut fed = build(true);
+        let mut starved = build(false);
+        for _ in 0..250 {
+            fed.step();
+            starved.step();
+        }
+        // Fraction of each world's matter that is dead (detritus).
+        let dead_frac = |w: &World| {
+            let det = w.total_detritus().unwrap();
+            det / (w.total_mass() + det)
+        };
+        let (fed_dead, starved_dead) = (dead_frac(&fed), dead_frac(&starved));
+        assert!(
+            starved_dead > fed_dead + 0.3,
+            "starved world should be far more detritus: starved {starved_dead:.2} vs fed {fed_dead:.2}"
+        );
+        // Recycling releases energy: the starved world's energy is not strictly zero
+        // even though it has no external source (dead matter fed it).
+        assert!(
+            starved.total_energy().unwrap() > 0.0,
+            "detritus decomposition should release energy into the starved world"
         );
     }
 

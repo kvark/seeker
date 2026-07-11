@@ -86,7 +86,12 @@ Current (M-γ):
   becomes a per-cell field that advects with the mass through the same transport
   (mass-weighted average on merge), so heterogeneous rules coexist and mix in one
   channel. Single-channel v0; toggleable; `mu_stats` exposes the gene-pool
-  variance (homogenization watch).
+  variance (homogenization watch). And **closed-loop detritus recycling** (M-γ-3,
+  `DetritusParams` + `enable_detritus`): starved matter dies into an inert detritus
+  channel that decomposes back into the live channel and releases energy as it
+  rots, so **matter is conserved across {live + detritus}** (not just the live
+  channel) while the energy economy is fed by its own dead. Off by default;
+  requires the energy economy; single matter channel v0.
 - `src/harness.rs` — measurement harness (F1). Intrinsic metrics over a raw
   `&[f32]` field (substrate-agnostic — matter, energy, detritus, GPU readback):
   field stats (total, occupancy, Shannon entropy + a localization/concentration
@@ -122,6 +127,10 @@ Current (M-γ):
 - `examples/metabolism.rs` — F2 → M-γ-2: searches rule + energy-economy genes for
   a self-sustaining metabolism, then A/Bs the winner fed vs starved (fed thrives,
   starved collapses); two-panel (matter | energy) GIF.
+- `examples/recycling.rs` — M-γ-3 A/B: a closed world (charge only, no vent) run
+  with recycling off vs on; recycling off only runs its energy down, on regenerates
+  energy from a detritus pool and keeps cycling; matter conserved across
+  {live + detritus}; three-panel (matter | detritus | energy) GIF.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -169,10 +178,23 @@ Each is gated on a **measured** property, not eyeballing.
   renewable sources; single shared energy field; no mass-destroying death yet.
   Open: does the gate want a floor / a per-channel field; tune costs via F2, not
   by hand.
-- **M-γ-3 — closed-loop detritus recycling.** Next: energy-starved matter converts
-  to an inert detritus channel that decays back into `E`, so mass is conserved
-  across {live + detritus} and the world recycles instead of freezing. Look for
-  sustained, non-collapsing ecosystems.
+- **M-γ-3 — closed-loop detritus recycling.** ✅ CPU done (`DetritusParams` +
+  `enable_detritus`). Energy-starved matter dies into an inert **detritus** channel
+  (death rate scaled by starvation `s = K/(E+K)`, the complement of the growth
+  gate); detritus decomposes back into the live channel and **releases energy** as
+  it rots. Death and recycling only *move* matter, so **`Σ live + Σ detritus` is
+  conserved exactly** (tested to ~1e-7). First recycling result, measured through a
+  closed-world A/B (`examples/recycling.rs`): with no external vent, M-γ-2's energy
+  only runs down (2765 → 1772) and death is irreversible dispersal, while M-γ-3
+  parks dying matter as a concentrated detritus pool (~685) that **regenerates
+  energy** (2765 → 3580, net positive) — the world feeds on its own dead and keeps
+  cycling (~1.8× the late activity). **v0 decisions / open items:** detritus is
+  inert (no advection) and carries no genome; single matter channel. The energy
+  released by decomposition is *not* yet accounted against the energy spent to
+  build that matter, so a closed world is net energy-positive — the idealized
+  "dead matter is food" mechanism, thermodynamic closure deferred. A genuinely
+  *thriving* sustained ecosystem (not just a conserved cycle) is an F2 target:
+  co-search rule + economy + detritus genes, not hand-tuning (see §Discipline).
 
 ## Followups (the phased program)
 

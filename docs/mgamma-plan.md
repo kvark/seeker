@@ -154,7 +154,14 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
   both. First real test of intrinsic selection — passed. (Ordering note: built before
   M-γ-1 parameter localization, at the human's request. Coupling is single-species for now;
   per-parameter selection lands once genotypes advect with the mass.)
-- **M-γ-3** — closed-loop detritus recycling. Look for sustained, non-collapsing ecosystems.
+- **M-γ-3** — closed-loop detritus recycling. ✅ CPU done (`DetritusParams`,
+  `enable_detritus`): starved matter dies into an inert detritus channel that decomposes
+  back into the live channel and releases energy as it rots. Matter conserved across
+  {live + detritus} to ~1e-7 (tested). Closed-world A/B (`examples/recycling.rs`): recycling
+  off only runs the energy down and disperses matter; recycling on parks it as detritus that
+  regenerates energy (net positive in a closed world) and keeps cycling. Open: energy release
+  is not yet accounted against build cost (net energy-positive — thermodynamic closure
+  deferred); a *thriving* ecosystem wants an F2 co-search of rule + economy + detritus genes.
 
 ---
 
