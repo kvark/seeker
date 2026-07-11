@@ -104,8 +104,9 @@ Current (M-γ):
   rewards coherent, persistent, *translating* structure, i.e. gliders), and
   `Metabolic` (M-γ-2 co-search — the genome also carries energy-economy genes
   (gate/consume/maintain/diffusion), evaluated in a charged, source-fed world;
-  quality is liveness *under* the economy, so only metabolisms that pay their
-  upkeep survive).
+  `quality_metabolic` rewards a *coherent* metabolism under the economy — a few
+  organisms living off the vent, coherence-gated so the search doesn't settle for
+  a busy soup that merely stays alive).
 - `examples/measure.rs` — the harness in action: metric time series + run
   summary.
 - `examples/search.rs` — F2 illumination: runs MAP-Elites, prints the behavior
@@ -193,11 +194,12 @@ Each is gated on a **measured** property, not eyeballing.
   dropping it into a two-species M-γ-1 world lifts mixing to ~5% blend vs ~0% for
   the static default rule (`examples/motility.rs`). **F2 also extended to M-γ-2:**
   every genome now carries energy genes (gate/consume/maintain/diffusion) and the
-  `Metabolic` objective evaluates in a charged, source-fed world — the search
-  found a metabolism that when fed sustains a lively structured field (~33 blobs,
-  activity ~0.07) and when starved collapses to one inert lump (activity ~0), mass
-  conserved ~1e-7 both (`examples/metabolism.rs`). Intrinsic selection, co-tuned by
-  F2 rather than imposed. GPU throughput (batch many worlds) is the unfair
+  `Metabolic` objective evaluates in a charged, source-fed world, scored by
+  `quality_metabolic` (coherence-gated: prefers a few organisms over a busy soup)
+  — the search found a metabolism that when fed sustains a few coherent organisms
+  off the vent (~5–7 blobs, activity ~0.035) and when starved collapses to one
+  inert lump (activity ~0), mass conserved ~1e-7 both (`examples/metabolism.rs`).
+  Intrinsic selection, co-tuned by F2 rather than imposed. GPU throughput (batch many worlds) is the unfair
   advantage — pure-CPU scalar convolution is the cost floor, so the CPU search
   stays at modest grid/horizon and leans on parallelism.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation,
