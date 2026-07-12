@@ -140,8 +140,9 @@ fn default_rule_genome() -> Genome {
     let d = FlowLeniaParams::default();
     Genome {
         genes: [d.growth_mu, d.growth_sigma, d.rings[0].peak, d.rings[0].width, d.dt, d.theta_a, d.alpha_n],
-        // Energy genes are inert for the (non-metabolic) motility path.
+        // Energy and detritus genes are inert for the (non-metabolic) motility path.
         energy: [0.5, 0.15, 0.004, 0.15],
+        detritus: [0.05, 0.01, 0.5],
     }
 }
 
