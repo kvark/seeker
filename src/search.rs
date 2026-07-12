@@ -23,7 +23,7 @@
 //! Every genome is evaluated from the *same* fixed random soup, so differences
 //! reflect the rule, not the seed.
 
-use crate::flow_lenia::{EnergyParams, FlowLeniaParams, KernelRing, World};
+use crate::flow_lenia::{DetritusParams, EnergyParams, FlowLeniaParams, KernelRing, World};
 use crate::harness::{measure_run, RunSummary, Sample};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -50,13 +50,24 @@ const E_CONSUME: usize = 1; // energy per unit mass built
 const E_MAINTAIN: usize = 2; // energy per unit mass per step
 const E_DIFFUSE: usize = 3; // energy diffusion coefficient
 
+/// Number of searchable **detritus-cycle** genes (M-γ-3 parameters). Like the
+/// energy genes, carried by every genome but only *read* under
+/// [`Objective::Ecosystem`]; inert passengers otherwise.
+pub const N_DETRITUS_GENES: usize = 3;
+// Detritus-gene indices.
+const D_DEATH: usize = 0; // starved-matter death rate
+const D_RECYCLE_MATTER: usize = 1; // detritus → live return rate
+const D_RECYCLE_ENERGY: usize = 2; // energy released per unit matter decomposed
+
 /// A point in Flow-Lenia rule space, plus its energy-economy genes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Genome {
     /// The 7 rule genes (growth, kernel ring, dt, θ_A, ramp n).
     pub genes: [f32; N_GENES],
-    /// The 4 energy-economy genes. Only read under [`Objective::Metabolic`].
+    /// The 4 energy-economy genes. Read under [`Objective::Metabolic`]/`Ecosystem`.
     pub energy: [f32; N_ENERGY_GENES],
+    /// The 3 detritus-cycle genes. Only read under [`Objective::Ecosystem`].
+    pub detritus: [f32; N_DETRITUS_GENES],
 }
 
 /// What the search rewards, and therefore which behavior it illuminates.
@@ -76,12 +87,25 @@ pub enum Objective {
     /// way survive, so the map illuminates *which metabolisms sustain life*. Map
     /// axis: activity (as for liveness, so the two maps are directly comparable).
     Metabolic,
+    /// A self-sustaining **ecosystem** under the closed loop (M-γ-3). Energy *and*
+    /// detritus genes are switched on and the world is deliberately *scarce* (a
+    /// small charge and a weak vent), so an organism cannot coast on external food
+    /// — it must recycle its own dead to persist. Quality rewards coherent living
+    /// structure that survives the scarcity, so the search co-tunes rule + economy
+    /// + recycling into a regime that thrives on turnover rather than a handout.
+    /// Map axis: activity (comparable to liveness/metabolic).
+    Ecosystem,
 }
 
 impl Objective {
     /// Whether this objective reads the genome's energy genes.
     fn uses_energy(self) -> bool {
-        matches!(self, Objective::Metabolic)
+        matches!(self, Objective::Metabolic | Objective::Ecosystem)
+    }
+
+    /// Whether this objective reads the genome's detritus-cycle genes.
+    fn uses_detritus(self) -> bool {
+        matches!(self, Objective::Ecosystem)
     }
 }
 
@@ -92,6 +116,8 @@ pub struct Bounds {
     pub hi: [f32; N_GENES],
     pub energy_lo: [f32; N_ENERGY_GENES],
     pub energy_hi: [f32; N_ENERGY_GENES],
+    pub detritus_lo: [f32; N_DETRITUS_GENES],
+    pub detritus_hi: [f32; N_DETRITUS_GENES],
 }
 
 impl Default for Bounds {
@@ -106,7 +132,13 @@ impl Default for Bounds {
         //                    gate  consume maintain diffuse
         let energy_lo = [0.30f32, 0.00, 0.001, 0.00];
         let energy_hi = [2.00f32, 0.50, 0.020, 0.25];
-        Bounds { lo, hi, energy_lo, energy_hi }
+        // Detritus bounds keep death always present (so recycling is load-bearing)
+        // and cap energy release well below "free food fills the world" — the loop
+        // must genuinely turn over matter, not print energy to dodge scarcity.
+        //                       death recycle_m recycle_e
+        let detritus_lo = [0.01f32, 0.002, 0.00];
+        let detritus_hi = [0.15f32, 0.050, 0.60];
+        Bounds { lo, hi, energy_lo, energy_hi, detritus_lo, detritus_hi }
     }
 }
 
@@ -121,7 +153,11 @@ impl Genome {
         for (i, gene) in energy.iter_mut().enumerate() {
             *gene = rng.gen_range(b.energy_lo[i]..=b.energy_hi[i]);
         }
-        Genome { genes, energy }
+        let mut detritus = [0.0f32; N_DETRITUS_GENES];
+        for (i, gene) in detritus.iter_mut().enumerate() {
+            *gene = rng.gen_range(b.detritus_lo[i]..=b.detritus_hi[i]);
+        }
+        Genome { genes, energy, detritus }
     }
 
     /// Gaussian mutation: perturb each gene by `sigma × (hi−lo)`, clamped. Both
@@ -138,7 +174,13 @@ impl Genome {
             let range = b.energy_hi[i] - b.energy_lo[i];
             *gene = (*gene + gaussian(rng) * sigma * range).clamp(b.energy_lo[i], b.energy_hi[i]);
         }
-        Genome { genes, energy }
+        let mut detritus = self.detritus;
+        for (i, gene) in detritus.iter_mut().enumerate() {
+            let range = b.detritus_hi[i] - b.detritus_lo[i];
+            *gene =
+                (*gene + gaussian(rng) * sigma * range).clamp(b.detritus_lo[i], b.detritus_hi[i]);
+        }
+        Genome { genes, energy, detritus }
     }
 
     /// Map the rule genes to substrate parameters (single channel, one ring).
@@ -168,6 +210,17 @@ impl Genome {
             gate_half: e[E_GATE],
             consume: e[E_CONSUME],
             maintain: e[E_MAINTAIN],
+        }
+    }
+
+    /// Map the detritus genes to a [`DetritusParams`] (the M-γ-3 death/recycle
+    /// coefficients the ecosystem search co-tunes).
+    pub fn to_detritus_params(&self) -> DetritusParams {
+        let d = &self.detritus;
+        DetritusParams {
+            death_rate: d[D_DEATH],
+            recycle_matter: d[D_RECYCLE_MATTER],
+            recycle_energy: d[D_RECYCLE_ENERGY],
         }
     }
 }
@@ -229,9 +282,20 @@ pub fn evaluate(genome: &Genome, cfg: &EvalConfig) -> Evaluated {
     if cfg.objective.uses_energy() {
         let ep = genome.to_energy_params();
         let cap = ep.capacity;
+        let radius = cfg.grid_size as f32 / 4.0;
         world.enable_energy(ep);
-        world.charge_energy(cap * 0.5);
-        world.add_source(c, c, cfg.grid_size as f32 / 4.0, 0.5);
+        if cfg.objective.uses_detritus() {
+            // Ecosystem: a *scarce* world — a small charge and a weak vent that
+            // alone cannot support the seeded biomass. Recycling is switched on and
+            // must carry the difference, so the detritus genes are load-bearing.
+            world.charge_energy(cap * 0.25);
+            world.add_source(c, c, radius, 0.2);
+            world.enable_detritus(genome.to_detritus_params());
+        } else {
+            // Metabolic: charged and fed by a healthy central source.
+            world.charge_energy(cap * 0.5);
+            world.add_source(c, c, radius, 0.5);
+        }
     }
     // Fixed initial condition: a central soup patch. Same for all genomes, so
     // behavior differences are attributable to the rule (and economy).
@@ -260,6 +324,14 @@ pub fn evaluate(genome: &Genome, cfg: &EvalConfig) -> Evaluated {
         // metabolism is a few coherent organisms at the vent, not a busy soup that
         // merely happens to stay alive. quality_metabolic gates on coherence.
         Objective::Metabolic => (
+            quality_metabolic(&summary, final_concentration, final_occupied),
+            (summary.mean_concentration, summary.mean_activity),
+        ),
+        // Ecosystem: coherent living structure that survives the scarce world. The
+        // quality is the same coherence-gated liveness as the metabolic objective —
+        // measured over the *live* field — but here it can only be earned by a
+        // recycling loop that keeps enough matter alive under scarcity.
+        Objective::Ecosystem => (
             quality_metabolic(&summary, final_concentration, final_occupied),
             (summary.mean_concentration, summary.mean_activity),
         ),
@@ -622,7 +694,11 @@ mod tests {
     fn insert_keeps_higher_quality() {
         let mut m = MapElites::new(MapConfig::default());
         let mk = |q: f32, bd: (f32, f32)| Evaluated {
-            genome: Genome { genes: [0.0; N_GENES], energy: [0.0; N_ENERGY_GENES] },
+            genome: Genome {
+                genes: [0.0; N_GENES],
+                energy: [0.0; N_ENERGY_GENES],
+                detritus: [0.0; N_DETRITUS_GENES],
+            },
             summary: RunSummary::default(),
             quality: q,
             bd,
@@ -723,12 +799,51 @@ mod tests {
         use crate::flow_lenia::FlowLeniaParams;
         let d = FlowLeniaParams::default();
         let rule = [d.growth_mu, d.growth_sigma, d.rings[0].peak, d.rings[0].width, d.dt, d.theta_a, d.alpha_n];
-        let generous = Genome { genes: rule, energy: [0.35, 0.02, 0.001, 0.15] };
-        let punishing = Genome { genes: rule, energy: [2.0, 0.5, 0.02, 0.0] };
+        let d = [0.05, 0.01, 0.5];
+        let generous = Genome { genes: rule, energy: [0.35, 0.02, 0.001, 0.15], detritus: d };
+        let punishing = Genome { genes: rule, energy: [2.0, 0.5, 0.02, 0.0], detritus: d };
         let cfg = EvalConfig { grid_size: 48, steps: 200, objective: Objective::Metabolic, ..Default::default() };
         let qg = evaluate(&generous, &cfg).quality;
         let qp = evaluate(&punishing, &cfg).quality;
         assert!(qg >= qp, "generous economy {qg} should not lose to punishing {qp}");
+    }
+
+    #[test]
+    fn random_and_mutated_detritus_genes_stay_in_bounds() {
+        let b = Bounds::default();
+        let mut rng = StdRng::seed_from_u64(31);
+        for _ in 0..200 {
+            let g = Genome::random(&mut rng, &b);
+            for i in 0..N_DETRITUS_GENES {
+                assert!(g.detritus[i] >= b.detritus_lo[i] && g.detritus[i] <= b.detritus_hi[i]);
+            }
+            let m = g.mutate(&mut rng, &b, 0.5);
+            for i in 0..N_DETRITUS_GENES {
+                assert!(
+                    m.detritus[i] >= b.detritus_lo[i] && m.detritus[i] <= b.detritus_hi[i],
+                    "d-gene {i} OOB"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ecosystem_recycling_genes_help_under_scarcity() {
+        // In the scarce ecosystem world, a genome whose dead matter returns as
+        // matter + energy (good recycling) must sustain coherent life at least as
+        // well as one that lets it die and stay dead (fast death, no return). Same
+        // rule and economy — only the detritus genes differ — so this proves the
+        // M-γ-3 genes are load-bearing for the ecosystem objective.
+        use crate::flow_lenia::FlowLeniaParams;
+        let fp = FlowLeniaParams::default();
+        let rule = [fp.growth_mu, fp.growth_sigma, fp.rings[0].peak, fp.rings[0].width, fp.dt, fp.theta_a, fp.alpha_n];
+        let econ = [0.35, 0.05, 0.002, 0.15]; // permissive economy so life is possible
+        let good = Genome { genes: rule, energy: econ, detritus: [0.05, 0.04, 0.5] };
+        let poor = Genome { genes: rule, energy: econ, detritus: [0.15, 0.002, 0.0] };
+        let cfg = EvalConfig { grid_size: 48, steps: 200, objective: Objective::Ecosystem, ..Default::default() };
+        let qg = evaluate(&good, &cfg).quality;
+        let qp = evaluate(&poor, &cfg).quality;
+        assert!(qg + 1e-6 >= qp, "good recycling {qg} should not lose to poor {qp}");
     }
 
     #[test]
