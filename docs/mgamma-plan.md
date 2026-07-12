@@ -161,7 +161,11 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
   off only runs the energy down and disperses matter; recycling on parks it as detritus that
   regenerates energy (net positive in a closed world) and keeps cycling. Open: energy release
   is not yet accounted against build cost (net energy-positive — thermodynamic closure
-  deferred); a *thriving* ecosystem wants an F2 co-search of rule + economy + detritus genes.
+  deferred). A *thriving* ecosystem was taken to F2 (`Ecosystem` objective, co-search rule +
+  economy + detritus genes, `examples/ecosystem.rs`) with an honest negative result: at CPU
+  scale the short eval horizon isn't scarce enough, so the search escapes scarcity (minimizes
+  death) rather than exploiting recycling (Risk #2). Real scarcity — finite/decaying sources,
+  longer horizons, thermodynamic closure, GPU scale — is the open lever.
 
 ---
 
@@ -207,8 +211,12 @@ Gate each on a **measured** property, not eyeballing (ties to the harness, §7-F
   coherence-gated quality (prefer a few organisms, not a busy soup) sharpens it: it found a
   metabolism that when fed sustains a few coherent organisms off the vent (~5–7 blobs,
   activity ~0.035) and when starved collapses to one inert lump — intrinsic selection,
-  discovered not imposed (`examples/metabolism.rs`). Next: ASAL/E&E-style VLM-goal search. GPU throughput (batch
-  many worlds) is the unfair advantage; the pure-CPU search stays at modest grid/horizon.
+  discovered not imposed (`examples/metabolism.rs`). **Extended to M-γ-3** (`Ecosystem`
+  objective, +detritus genes, `examples/ecosystem.rs`) with an honest negative: at CPU scale
+  the eval horizon isn't scarce enough, so the search escapes scarcity rather than exploiting
+  recycling (Risk #2) — real scarcity is the lever. Next: genuine scarcity + ASAL/E&E-style
+  VLM-goal search. GPU throughput (batch many worlds) is the unfair advantage; the pure-CPU
+  search stays at modest grid/horizon.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation, energy, sources,
   parameter localization, state continuity (discretize), dimensionality (2D↔3D); measure the
   effect on *sustained novelty*. This converts intuition into **necessity claims** — the thing
