@@ -111,7 +111,10 @@ Current (M-γ):
   (gate/consume/maintain/diffusion), evaluated in a charged, source-fed world;
   `quality_metabolic` rewards a *coherent* metabolism under the economy — a few
   organisms living off the vent, coherence-gated so the search doesn't settle for
-  a busy soup that merely stays alive).
+  a busy soup that merely stays alive), and `Ecosystem` (M-γ-3 co-search — the
+  genome *also* carries detritus-cycle genes (death/recycle_matter/recycle_energy),
+  evaluated in a deliberately scarce world so recycling can be load-bearing;
+  quality is the same coherence-gated liveness).
 - `examples/measure.rs` — the harness in action: metric time series + run
   summary.
 - `examples/search.rs` — F2 illumination: runs MAP-Elites, prints the behavior
@@ -131,6 +134,12 @@ Current (M-γ):
   with recycling off vs on; recycling off only runs its energy down, on regenerates
   energy from a detritus pool and keeps cycling; matter conserved across
   {live + detritus}; three-panel (matter | detritus | energy) GIF.
+- `examples/ecosystem.rs` — F2 → M-γ-3: searches rule + energy + detritus genes for
+  a scarcity-proof ecosystem, then A/Bs the winner with recycling on vs off. **Honest
+  negative-ish result:** at CPU scale (48²/200-step eval) the world isn't scarce
+  within the horizon, so the search escapes scarcity (drives death to its floor) and
+  recycling stays marginal — Risk #2 made concrete; real scarcity (finite/decaying
+  sources, longer horizons, thermodynamic closure, GPU scale) is the lever.
 
 Legacy (M-α / M-β discrete lineage — retained until M-γ subsumes their function,
 then to be removed; all history is in git):
@@ -193,8 +202,13 @@ Each is gated on a **measured** property, not eyeballing.
   released by decomposition is *not* yet accounted against the energy spent to
   build that matter, so a closed world is net energy-positive — the idealized
   "dead matter is food" mechanism, thermodynamic closure deferred. A genuinely
-  *thriving* sustained ecosystem (not just a conserved cycle) is an F2 target:
-  co-search rule + economy + detritus genes, not hand-tuning (see §Discipline).
+  *thriving* sustained ecosystem (not just a conserved cycle) was taken to F2
+  (`Ecosystem` objective, co-search rule + economy + detritus genes, no
+  hand-tuning) — and the honest result is that it **does not yet appear at CPU
+  scale**: the short eval horizon means the world isn't scarce within the run, so
+  the search escapes scarcity (minimizes death) rather than exploiting recycling
+  (Risk #2). Real scarcity — finite/decaying sources, longer horizons, thermodynamic
+  closure, GPU scale — is the open lever (`examples/ecosystem.rs`).
 
 ## Followups (the phased program)
 
@@ -221,9 +235,17 @@ Each is gated on a **measured** property, not eyeballing.
   — the search found a metabolism that when fed sustains a few coherent organisms
   off the vent (~5–7 blobs, activity ~0.035) and when starved collapses to one
   inert lump (activity ~0), mass conserved ~1e-7 both (`examples/metabolism.rs`).
-  Intrinsic selection, co-tuned by F2 rather than imposed. GPU throughput (batch many worlds) is the unfair
-  advantage — pure-CPU scalar convolution is the cost floor, so the CPU search
-  stays at modest grid/horizon and leans on parallelism.
+  Intrinsic selection, co-tuned by F2 rather than imposed. **F2 also extended to
+  M-γ-3** (`Ecosystem` objective, +detritus genes, scarce-world eval,
+  `examples/ecosystem.rs`) — but this one is an *honest negative*: at CPU scale the
+  ~48²/200-step eval is too short for energy to deplete, so the world isn't actually
+  scarce within the run and the search escapes scarcity (drives death to its floor,
+  recycling stays marginal — render A/B ~1.2× activity, energy saturated). Risk #2
+  ("the energy layer may do nothing") made concrete; genuine recycling-dependent
+  selection needs real scarcity (finite/decaying sources, longer horizons,
+  thermodynamic closure) — i.e. the GPU-scale search. GPU throughput (batch many
+  worlds) is the unfair advantage — pure-CPU scalar convolution is the cost floor,
+  so the CPU search stays at modest grid/horizon and leans on parallelism.
 - **F3 — Ablation science (the actual contribution).** Toggle mass conservation,
   energy, sources, parameter localization, state continuity, dimensionality;
   measure the effect on *sustained novelty*. Converts intuition into necessity

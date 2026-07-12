@@ -80,17 +80,46 @@ fn main() {
     print_row("recycling off (M-γ-2)", &no_recycle);
     print_row("recycling on  (M-γ-3)", &recycling);
 
-    let act_uplift = recycling.late_activity / no_recycle.late_activity.max(1e-9);
+    // Honest, data-driven read of what the search actually found — no dressing up.
+    let act_ratio = recycling.late_activity / no_recycle.late_activity.max(1e-9);
+    let conc_ratio = recycling.late_conc / no_recycle.late_conc.max(1e-9);
+    let e_max = EnergyParams::default().capacity as f64 * (W * W) as f64;
+    let saturated = recycling.final_energy > 0.95 * e_max;
+    // Did the search lean on recycling, or escape scarcity by barely dying?
+    let death_floor = 0.01; // Bounds::default detritus lower bound
+    let minimized_death = dp.death_rate <= death_floor * 1.2;
+
+    println!("\nHonest read of the result:");
     println!(
-        "\nThe search co-tuned rule + economy + recycling for a scarce world. With recycling\n\
-         off the discovered genome cannot hold its structure on the weak vent alone; with\n\
-         recycling on it parks dying matter as detritus ({:.0}) that feeds energy back and\n\
-         keeps a living ecosystem turning over (late activity ~{:.1}× higher). Matter conserved\n\
-         across live+detritus to {:.1e}.\n\n\
-         Note: as in M-γ-3, decomposition energy is not yet debited against build cost, so the\n\
-         recycling loop is idealized (an open thermodynamic-closure question). The conserved,\n\
-         tested invariant is *matter*. gif → {out}  (matter | detritus | energy)",
-        recycling.final_detritus, act_uplift, recycling.matter_drift
+        "  recycling on vs off: activity ×{act_ratio:.2}, concentration ×{conc_ratio:.2}; \
+         detritus pool {:.0}; matter conserved to {:.1e}.",
+        recycling.final_detritus, recycling.matter_drift
+    );
+    if minimized_death || saturated {
+        println!(
+            "  But the search drove death to its floor ({:.4} vs bound {death_floor}) and the \
+             render world's\n  energy {}— so at this grid/horizon the world is not actually \
+             scarce within the eval, and\n  recycling is not yet load-bearing. This is Risk #2 \
+             (\"the energy layer may do nothing\")\n  made concrete: the ~48²/200-step eval is too \
+             short for energy to deplete, so the search\n  escapes scarcity rather than exploiting \
+             the loop. Genuine recycling-dependent selection\n  needs real scarcity — finite/\
+             decaying sources, longer horizons, denser worlds, or the\n  thermodynamic closure \
+             that gives recycling a true cost — i.e. the GPU-scale search.",
+            dp.death_rate,
+            if saturated { "saturates" } else { "stays high" }
+        );
+    } else {
+        println!(
+            "  The search kept a real death+recycle loop (death {:.4}) and recycling lifts the \
+             living\n  structure over the un-recycled control — a scarcity-proof ecosystem the \
+             search found.",
+            dp.death_rate
+        );
+    }
+    println!(
+        "\nMechanism note: decomposition energy is not yet debited against build cost, so the \
+         loop\nis idealized (thermodynamic-closure open question). The conserved, tested invariant \
+         is\n*matter*. gif → {out}  (matter | detritus | energy)"
     );
 }
 
