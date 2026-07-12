@@ -91,8 +91,8 @@ pub enum Objective {
     /// detritus genes are switched on and the world is deliberately *scarce* (a
     /// small charge and a weak vent), so an organism cannot coast on external food
     /// — it must recycle its own dead to persist. Quality rewards coherent living
-    /// structure that survives the scarcity, so the search co-tunes rule + economy
-    /// + recycling into a regime that thrives on turnover rather than a handout.
+    /// structure that survives the scarcity, so the search co-tunes rule, economy,
+    /// and recycling into a regime that thrives on turnover rather than a handout.
     /// Map axis: activity (comparable to liveness/metabolic).
     Ecosystem,
 }
@@ -138,7 +138,14 @@ impl Default for Bounds {
         //                       death recycle_m recycle_e
         let detritus_lo = [0.01f32, 0.002, 0.00];
         let detritus_hi = [0.15f32, 0.050, 0.60];
-        Bounds { lo, hi, energy_lo, energy_hi, detritus_lo, detritus_hi }
+        Bounds {
+            lo,
+            hi,
+            energy_lo,
+            energy_hi,
+            detritus_lo,
+            detritus_hi,
+        }
     }
 }
 
@@ -157,7 +164,11 @@ impl Genome {
         for (i, gene) in detritus.iter_mut().enumerate() {
             *gene = rng.gen_range(b.detritus_lo[i]..=b.detritus_hi[i]);
         }
-        Genome { genes, energy, detritus }
+        Genome {
+            genes,
+            energy,
+            detritus,
+        }
     }
 
     /// Gaussian mutation: perturb each gene by `sigma × (hi−lo)`, clamped. Both
@@ -180,7 +191,11 @@ impl Genome {
             *gene =
                 (*gene + gaussian(rng) * sigma * range).clamp(b.detritus_lo[i], b.detritus_hi[i]);
         }
-        Genome { genes, energy, detritus }
+        Genome {
+            genes,
+            energy,
+            detritus,
+        }
     }
 
     /// Map the rule genes to substrate parameters (single channel, one ring).
@@ -189,7 +204,11 @@ impl Genome {
         FlowLeniaParams {
             channels: 1,
             kernel_radius,
-            rings: vec![KernelRing { peak: g[PEAK], width: g[WIDTH], weight: 1.0 }],
+            rings: vec![KernelRing {
+                peak: g[PEAK],
+                width: g[WIDTH],
+                weight: 1.0,
+            }],
             growth_mu: g[MU],
             growth_sigma: g[SIGMA],
             dt: g[DT],
@@ -492,8 +511,11 @@ impl MapElites {
 
     /// Highest-quality elite in the whole map.
     pub fn best(&self) -> Option<&Evaluated> {
-        self.occupied()
-            .max_by(|a, b| a.quality.partial_cmp(&b.quality).unwrap_or(std::cmp::Ordering::Equal))
+        self.occupied().max_by(|a, b| {
+            a.quality
+                .partial_cmp(&b.quality)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     pub fn config(&self) -> &MapConfig {
@@ -563,7 +585,8 @@ fn parallel_eval(genomes: &[Genome], cfg: &EvalConfig) -> Vec<Evaluated> {
                 break;
             }
             let slice = &genomes[start..end];
-            handles.push(s.spawn(move || slice.iter().map(|g| evaluate(g, cfg)).collect::<Vec<_>>()));
+            handles
+                .push(s.spawn(move || slice.iter().map(|g| evaluate(g, cfg)).collect::<Vec<_>>()));
         }
         for h in handles {
             out.extend(h.join().expect("eval thread panicked"));
@@ -659,7 +682,10 @@ mod tests {
         for _ in 0..500 {
             let m = g.mutate(&mut rng, &b, 0.5);
             for i in 0..N_GENES {
-                assert!(m.genes[i] >= b.lo[i] && m.genes[i] <= b.hi[i], "gene {i} OOB");
+                assert!(
+                    m.genes[i] >= b.lo[i] && m.genes[i] <= b.hi[i],
+                    "gene {i} OOB"
+                );
             }
         }
     }
@@ -675,7 +701,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5);
         let g = Genome::random(&mut rng, &Bounds::default());
         let e = evaluate(&g, &cfg);
-        assert!(e.summary.mass_drift < 1e-4, "drift {}", e.summary.mass_drift);
+        assert!(
+            e.summary.mass_drift < 1e-4,
+            "drift {}",
+            e.summary.mass_drift
+        );
         assert!(e.bd.0 >= 0.0 && e.bd.0 <= 1.0);
         assert!(e.bd.1 >= 0.0);
         assert!(e.quality >= 0.0);
@@ -683,7 +713,12 @@ mod tests {
 
     #[test]
     fn map_binning_is_in_range() {
-        let m = MapElites::new(MapConfig { res_x: 8, res_y: 8, x_range: (0.0, 1.0), y_range: (0.0, 1.0) });
+        let m = MapElites::new(MapConfig {
+            res_x: 8,
+            res_y: 8,
+            x_range: (0.0, 1.0),
+            y_range: (0.0, 1.0),
+        });
         assert_eq!(MapElites::bin(-1.0, (0.0, 1.0), 8), 0);
         assert_eq!(MapElites::bin(2.0, (0.0, 1.0), 8), 7);
         assert_eq!(MapElites::bin(0.5, (0.0, 1.0), 8), 4);
@@ -717,13 +752,35 @@ mod tests {
     fn motility_quality_rewards_coherent_movement() {
         // A coherent glider (one blob, drifting) must score above an equally
         // persistent but stationary blob, and above a fast-but-fragmented soup.
-        let mover = RunSummary { mean_speed: 1.0, mean_components: 1.0, ..RunSummary::default() };
-        let still = RunSummary { mean_speed: 0.0, mean_components: 1.0, ..RunSummary::default() };
-        let soup = RunSummary { mean_speed: 1.0, mean_components: 30.0, ..RunSummary::default() };
+        let mover = RunSummary {
+            mean_speed: 1.0,
+            mean_components: 1.0,
+            ..RunSummary::default()
+        };
+        let still = RunSummary {
+            mean_speed: 0.0,
+            mean_components: 1.0,
+            ..RunSummary::default()
+        };
+        let soup = RunSummary {
+            mean_speed: 1.0,
+            mean_components: 30.0,
+            ..RunSummary::default()
+        };
         // final_concentration/occupied chosen "alive" for all three.
         let q = |s: &RunSummary| quality_motility(s, 0.2, 0.05);
-        assert!(q(&mover) > q(&still), "mover {} !> still {}", q(&mover), q(&still));
-        assert!(q(&mover) > q(&soup), "mover {} !> soup {}", q(&mover), q(&soup));
+        assert!(
+            q(&mover) > q(&still),
+            "mover {} !> still {}",
+            q(&mover),
+            q(&still)
+        );
+        assert!(
+            q(&mover) > q(&soup),
+            "mover {} !> soup {}",
+            q(&mover),
+            q(&soup)
+        );
     }
 
     #[test]
@@ -731,15 +788,40 @@ mod tests {
         // The sharpener: a lively few-organism metabolism must beat a busy soup
         // that is just as active (the old liveness quality scored them equally),
         // and beat an inert static lump (coherent but not metabolizing).
-        let organism = RunSummary { mean_activity: 0.05, mean_components: 1.5, ..RunSummary::default() };
-        let soup = RunSummary { mean_activity: 0.05, mean_components: 30.0, ..RunSummary::default() };
-        let lump = RunSummary { mean_activity: 0.0, mean_components: 1.0, ..RunSummary::default() };
+        let organism = RunSummary {
+            mean_activity: 0.05,
+            mean_components: 1.5,
+            ..RunSummary::default()
+        };
+        let soup = RunSummary {
+            mean_activity: 0.05,
+            mean_components: 30.0,
+            ..RunSummary::default()
+        };
+        let lump = RunSummary {
+            mean_activity: 0.0,
+            mean_components: 1.0,
+            ..RunSummary::default()
+        };
         let q = |s: &RunSummary| quality_metabolic(s, 0.2, 0.05);
-        assert!(q(&organism) > q(&soup), "organism {} !> soup {}", q(&organism), q(&soup));
-        assert!(q(&organism) > q(&lump), "organism {} !> lump {}", q(&organism), q(&lump));
+        assert!(
+            q(&organism) > q(&soup),
+            "organism {} !> soup {}",
+            q(&organism),
+            q(&soup)
+        );
+        assert!(
+            q(&organism) > q(&lump),
+            "organism {} !> lump {}",
+            q(&organism),
+            q(&lump)
+        );
         // And liveness would NOT separate organism from soup — confirming the gap.
         let ql = |s: &RunSummary| quality_liveness(s, 0.2, 0.05);
-        assert!((ql(&organism) - ql(&soup)).abs() < 1e-6, "liveness should tie them");
+        assert!(
+            (ql(&organism) - ql(&soup)).abs() < 1e-6,
+            "liveness should tie them"
+        );
     }
 
     #[test]
@@ -748,9 +830,26 @@ mod tests {
         // under liveness it is mean_activity. Same genome, different bd.y source.
         let mut rng = StdRng::seed_from_u64(5);
         let g = Genome::random(&mut rng, &Bounds::default());
-        let base = EvalConfig { grid_size: 32, steps: 60, sample_every: 15, ..Default::default() };
-        let live = evaluate(&g, &EvalConfig { objective: Objective::Liveness, ..base.clone() });
-        let move_ = evaluate(&g, &EvalConfig { objective: Objective::Motility, ..base });
+        let base = EvalConfig {
+            grid_size: 32,
+            steps: 60,
+            sample_every: 15,
+            ..Default::default()
+        };
+        let live = evaluate(
+            &g,
+            &EvalConfig {
+                objective: Objective::Liveness,
+                ..base.clone()
+            },
+        );
+        let move_ = evaluate(
+            &g,
+            &EvalConfig {
+                objective: Objective::Motility,
+                ..base
+            },
+        );
         assert_eq!(live.bd.1, live.summary.mean_activity);
         assert_eq!(move_.bd.1, move_.summary.mean_speed);
         // x-descriptor (concentration) is shared, so the maps are comparable.
@@ -768,7 +867,10 @@ mod tests {
             }
             let m = g.mutate(&mut rng, &b, 0.5);
             for i in 0..N_ENERGY_GENES {
-                assert!(m.energy[i] >= b.energy_lo[i] && m.energy[i] <= b.energy_hi[i], "e-gene {i} OOB");
+                assert!(
+                    m.energy[i] >= b.energy_lo[i] && m.energy[i] <= b.energy_hi[i],
+                    "e-gene {i} OOB"
+                );
             }
         }
     }
@@ -787,7 +889,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5);
         let g = Genome::random(&mut rng, &Bounds::default());
         let e = evaluate(&g, &cfg);
-        assert!(e.summary.mass_drift < 1e-4, "drift {}", e.summary.mass_drift);
+        assert!(
+            e.summary.mass_drift < 1e-4,
+            "drift {}",
+            e.summary.mass_drift
+        );
         assert!(e.quality >= 0.0);
     }
 
@@ -798,14 +904,38 @@ mod tests {
         // upkeep, energy-hungry gate). Proves the economy genes do selective work.
         use crate::flow_lenia::FlowLeniaParams;
         let d = FlowLeniaParams::default();
-        let rule = [d.growth_mu, d.growth_sigma, d.rings[0].peak, d.rings[0].width, d.dt, d.theta_a, d.alpha_n];
+        let rule = [
+            d.growth_mu,
+            d.growth_sigma,
+            d.rings[0].peak,
+            d.rings[0].width,
+            d.dt,
+            d.theta_a,
+            d.alpha_n,
+        ];
         let d = [0.05, 0.01, 0.5];
-        let generous = Genome { genes: rule, energy: [0.35, 0.02, 0.001, 0.15], detritus: d };
-        let punishing = Genome { genes: rule, energy: [2.0, 0.5, 0.02, 0.0], detritus: d };
-        let cfg = EvalConfig { grid_size: 48, steps: 200, objective: Objective::Metabolic, ..Default::default() };
+        let generous = Genome {
+            genes: rule,
+            energy: [0.35, 0.02, 0.001, 0.15],
+            detritus: d,
+        };
+        let punishing = Genome {
+            genes: rule,
+            energy: [2.0, 0.5, 0.02, 0.0],
+            detritus: d,
+        };
+        let cfg = EvalConfig {
+            grid_size: 48,
+            steps: 200,
+            objective: Objective::Metabolic,
+            ..Default::default()
+        };
         let qg = evaluate(&generous, &cfg).quality;
         let qp = evaluate(&punishing, &cfg).quality;
-        assert!(qg >= qp, "generous economy {qg} should not lose to punishing {qp}");
+        assert!(
+            qg >= qp,
+            "generous economy {qg} should not lose to punishing {qp}"
+        );
     }
 
     #[test]
@@ -836,14 +966,38 @@ mod tests {
         // M-γ-3 genes are load-bearing for the ecosystem objective.
         use crate::flow_lenia::FlowLeniaParams;
         let fp = FlowLeniaParams::default();
-        let rule = [fp.growth_mu, fp.growth_sigma, fp.rings[0].peak, fp.rings[0].width, fp.dt, fp.theta_a, fp.alpha_n];
+        let rule = [
+            fp.growth_mu,
+            fp.growth_sigma,
+            fp.rings[0].peak,
+            fp.rings[0].width,
+            fp.dt,
+            fp.theta_a,
+            fp.alpha_n,
+        ];
         let econ = [0.35, 0.05, 0.002, 0.15]; // permissive economy so life is possible
-        let good = Genome { genes: rule, energy: econ, detritus: [0.05, 0.04, 0.5] };
-        let poor = Genome { genes: rule, energy: econ, detritus: [0.15, 0.002, 0.0] };
-        let cfg = EvalConfig { grid_size: 48, steps: 200, objective: Objective::Ecosystem, ..Default::default() };
+        let good = Genome {
+            genes: rule,
+            energy: econ,
+            detritus: [0.05, 0.04, 0.5],
+        };
+        let poor = Genome {
+            genes: rule,
+            energy: econ,
+            detritus: [0.15, 0.002, 0.0],
+        };
+        let cfg = EvalConfig {
+            grid_size: 48,
+            steps: 200,
+            objective: Objective::Ecosystem,
+            ..Default::default()
+        };
         let qg = evaluate(&good, &cfg).quality;
         let qp = evaluate(&poor, &cfg).quality;
-        assert!(qg + 1e-6 >= qp, "good recycling {qg} should not lose to poor {qp}");
+        assert!(
+            qg + 1e-6 >= qp,
+            "good recycling {qg} should not lose to poor {qp}"
+        );
     }
 
     #[test]
@@ -857,7 +1011,12 @@ mod tests {
                 objective: Objective::Motility,
                 ..Default::default()
             },
-            map: MapConfig { res_x: 6, res_y: 6, x_range: (0.0, 0.6), y_range: (0.0, 3.0) },
+            map: MapConfig {
+                res_x: 6,
+                res_y: 6,
+                x_range: (0.0, 0.6),
+                y_range: (0.0, 3.0),
+            },
             init_batch: 16,
             generations: 4,
             batch: 8,
@@ -872,15 +1031,27 @@ mod tests {
     fn map_elites_fills_cells() {
         // Small, fast search: just confirm the loop runs and illuminates.
         let cfg = SearchConfig {
-            eval: EvalConfig { grid_size: 24, steps: 40, sample_every: 10, ..Default::default() },
-            map: MapConfig { res_x: 6, res_y: 6, ..Default::default() },
+            eval: EvalConfig {
+                grid_size: 24,
+                steps: 40,
+                sample_every: 10,
+                ..Default::default()
+            },
+            map: MapConfig {
+                res_x: 6,
+                res_y: 6,
+                ..Default::default()
+            },
             init_batch: 16,
             generations: 4,
             batch: 8,
             ..Default::default()
         };
         let archive = map_elites(&cfg);
-        assert!(archive.filled() >= 1, "search should fill at least one cell");
+        assert!(
+            archive.filled() >= 1,
+            "search should fill at least one cell"
+        );
         assert!(archive.best().is_some());
     }
 }

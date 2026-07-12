@@ -29,11 +29,17 @@ const W: usize = 96;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let generations: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(24);
-    let out = args.get(2).map(|s| s.as_str()).unwrap_or("data/ecosystem.gif");
+    let out = args
+        .get(2)
+        .map(|s| s.as_str())
+        .unwrap_or("data/ecosystem.gif");
 
     // --- Search rule + economy + recycling for a scarcity-proof ecosystem. -----
     let cfg = SearchConfig {
-        eval: EvalConfig { objective: Objective::Ecosystem, ..Default::default() },
+        eval: EvalConfig {
+            objective: Objective::Ecosystem,
+            ..Default::default()
+        },
         map: MapConfig::default(),
         init_batch: 96,
         generations,
@@ -98,7 +104,7 @@ fn main() {
     if minimized_death || saturated {
         println!(
             "  But the search drove death to its floor ({:.4} vs bound {death_floor}) and the \
-             render world's\n  energy {}— so at this grid/horizon the world is not actually \
+             render world's\n  energy {} — so at this grid/horizon the world is not actually \
              scarce within the eval, and\n  recycling is not yet load-bearing. This is Risk #2 \
              (\"the energy layer may do nothing\")\n  made concrete: the ~48²/200-step eval is too \
              short for energy to deplete, so the search\n  escapes scarcity rather than exploiting \
@@ -135,7 +141,12 @@ struct Report {
 fn print_row(label: &str, r: &Report) {
     println!(
         "  {label} | {:9.3} | {:13.2e} | {:10.2} | {:14.2} | {:12.2} | {:11.1e}",
-        r.late_conc, r.late_activity, r.final_live, r.final_detritus, r.final_energy, r.matter_drift
+        r.late_conc,
+        r.late_activity,
+        r.final_live,
+        r.final_detritus,
+        r.final_energy,
+        r.matter_drift
     );
 }
 
@@ -185,7 +196,11 @@ fn run(
     for step in 1..=steps {
         world.step();
         let cur = world.mass_field();
-        let act: f64 = cur.iter().zip(&prev).map(|(a, b)| (*a - *b).abs() as f64).sum::<f64>()
+        let act: f64 = cur
+            .iter()
+            .zip(&prev)
+            .map(|(a, b)| (*a - *b).abs() as f64)
+            .sum::<f64>()
             / cur.len() as f64;
         prev = cur;
         let total = world.total_mass() + world.total_detritus().unwrap_or(0.0);
